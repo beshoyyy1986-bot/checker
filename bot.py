@@ -664,7 +664,14 @@ async def show_start_menu(event):
     buttons = [
         [Button.url("𝙼𝙰𝙸𝙽 ", "https://t.me/afuonax"),
          Button.url("𝙲𝙰𝚁𝙳𝙸𝙽𝙶", SECOND_CHANNEL_LINK)],
-        [Button.inline("𝙼𝙴𝙽𝚄", b"main_menu")]
+        [Button.inline("💳 CHECK CARDS", b"check_cards"),
+         Button.inline("🌐 ADD SITES", b"add_sites")],
+        [Button.inline("🔌 ADD PROXY", b"add_proxies"),
+         Button.inline("📋 MY SITES", b"my_sites")],
+        [Button.inline("📋 MY PROXIES", b"my_proxies"),
+         Button.inline("🧪 TEST SITES", b"test_sites")],
+        [Button.inline("🧪 TEST PROXIES", b"test_proxies"),
+         Button.inline("ℹ️ USER INFO", b"user_info")]
     ]
     
     
