@@ -16,9 +16,9 @@ import aiohttp
 import aiofiles
 
 # ==================== CONFIG ====================
-API_ID = id
-API_HASH = "hash"
-BOT_TOKEN = "token"
+API_ID = int(os.getenv("API_ID", "1234567"))
+API_HASH = os.getenv("API_HASH", "your_api_hash")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token")
 API_BASE_URL = "https://xafuona.3utilities.com"
 API_KEY = "afuona_2026"
 SECOND_CHANNEL_LINK = "https://t.me/+kxhCcDXQgzQ5MjE0"
