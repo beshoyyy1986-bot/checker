@@ -1510,10 +1510,12 @@ def get_bin_info(bin6):
                     time.sleep(2)
                     continue
                 if r.status_code not in (200, 201):
+                    logger.warning(f"BIN API {url} returned {r.status_code}")
                     continue
                 try:
                     d = r.json()
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"BIN API {url} JSON parse error: {e}")
                     continue
                 parsed = parser(d)
                 if parsed:
@@ -1521,8 +1523,10 @@ def get_bin_info(bin6):
                     if parsed.get("bank","?") in ("?", "", None):
                         parsed["bank"] = "Unknown Bank"
                     result = parsed
+                    logger.info(f"BIN {bin6} found from {url}")
                     break
-            except Exception:
+            except Exception as e:
+                logger.warning(f"BIN API {url} error: {e}")
                 continue
 
         if result is None:
