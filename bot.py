@@ -1472,7 +1472,7 @@ def get_bin_info(bin6):
         # ── 5. Sources list: (url, extra_headers, parser_fn) ─────────────────
         UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         sources = [
-            # binlist.net — most popular
+            # binlist.net — most popular (move to first priority)
             (f"https://lookup.binlist.net/{bin6}",
              {"Accept-Version": "3", "User-Agent": UA},
              _parse_binlist),
@@ -1500,6 +1500,10 @@ def get_bin_info(bin6):
             (f"https://neutrinoapi.net/bin-lookup?bin-number={bin6}&output-format=json",
              {"User-Agent": UA},
              _parse_neutrino),
+            # card-bin-checker.com (backup)
+            (f"https://card-bin-checker.com/api/{bin6}",
+             {"User-Agent": UA},
+             _parse_generic),
         ]
 
         result = None
