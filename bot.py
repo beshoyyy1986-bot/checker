@@ -3289,6 +3289,7 @@ if __name__ == '__main__':
     print("Starting bot in Polling mode...")
     sys.stdout.flush()
     try:
+        bot.delete_webhook()
         bot.remove_webhook()
     except Exception as e:
         logger.warning(f"remove_webhook: {e}")
