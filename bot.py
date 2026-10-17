@@ -389,7 +389,9 @@ class ProxyPool:
 print("Creating proxy pool...")
 sys.stdout.flush()
 proxy_pool = ProxyPool()
-print("Proxy pool initialized")
+# Always ensure the hardcoded Oxylabs proxy is present
+proxy_pool.add_proxy(HARDCODED_PROXY)
+print(f"Proxy pool initialized — hardcoded proxy loaded: {HARDCODED_PROXY[:30]}...")
 sys.stdout.flush()
 
 # ═══════════════════════════════════════
@@ -977,6 +979,10 @@ CW_UA         = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                  "AppleWebKit/537.36 (KHTML, like Gecko) "
                  "Chrome/153.0.0.0 Safari/537.36")
 
+# ── Hardcoded default proxy (Oxylabs DC) ────────────────────────────────────
+# Password special chars URL-encoded: + → %2B
+HARDCODED_PROXY = "user-dc_d39affa4-country-US:kA%2BP~N61IhJn@dc.oxylabs.io:8000"
+
 CW_DOMAINS = ["hotmail.com"]*3 + ["outlook.com"]*3 + ["yahoo.com"]*2 + ["gmail.com"]
 CW_FIRSTS  = ["James","Oliver","Liam","Noah","Emma","Sophia","Lucas",
               "Henry","Ella","Grace","Mason","Ethan","Chloe","Ryan"]
@@ -1100,7 +1106,7 @@ def check_cw_gate(card_str, proxy=None):
             "key":             CW_PK,
             "_stripe_version": CW_STRIPE_VER,
         }
-        r1 = requests.post(   # Stripe: use plain requests (not session) to avoid cookie leak
+        r1 = requests.post(   # Stripe: always direct — proxy providers block CONNECT to api.stripe.com
             "https://api.stripe.com/v1/confirmation_tokens",
             data=stripe_data,
             headers={
@@ -1112,7 +1118,7 @@ def check_cw_gate(card_str, proxy=None):
                 "Accept":          "application/json",
                 "Accept-Language": "en-US,en;q=0.9",
             },
-            proxies=proxy_d, timeout=30,
+            proxies=None, timeout=30,
         )
         try:
             r1j = r1.json()
