@@ -386,6 +386,10 @@ class ProxyPool:
             d = sum(1 for s in self.proxies.values() if s['status'] == 'dead')
             return a, b, d
 
+# ── Hardcoded default proxy (Oxylabs DC) ────────────────────────────────────
+# Password special chars URL-encoded: + → %2B
+HARDCODED_PROXY = "user-dc_d39affa4-country-US:kA%2BP~N61IhJn@dc.oxylabs.io:8000"
+
 print("Creating proxy pool...")
 sys.stdout.flush()
 proxy_pool = ProxyPool()
@@ -978,10 +982,6 @@ CW_CAMPAIGN   = "e312f371-fcd2-446e-8b51-c6c393b2b0af"
 CW_UA         = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                  "AppleWebKit/537.36 (KHTML, like Gecko) "
                  "Chrome/153.0.0.0 Safari/537.36")
-
-# ── Hardcoded default proxy (Oxylabs DC) ────────────────────────────────────
-# Password special chars URL-encoded: + → %2B
-HARDCODED_PROXY = "user-dc_d39affa4-country-US:kA%2BP~N61IhJn@dc.oxylabs.io:8000"
 
 CW_DOMAINS = ["hotmail.com"]*3 + ["outlook.com"]*3 + ["yahoo.com"]*2 + ["gmail.com"]
 CW_FIRSTS  = ["James","Oliver","Liam","Noah","Emma","Sophia","Lucas",
