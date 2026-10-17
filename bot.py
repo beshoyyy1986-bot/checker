@@ -1316,58 +1316,67 @@ def get_bin_info(bin6):
         if bin6 in _bin_cache:
             return _bin_cache[bin6]
 
-    # ── 2. Rate-limit: max ~1.6 req/sec across all threads ───────────────────
-    with _bin_cache_lock:
-        wait = 0.6 - (time.time() - _bin_last_call[0])
-        if wait > 0:
-            time.sleep(wait)
-        _bin_last_call[0] = time.time()
-
     EMPTY = {"brand": "?", "type": "?", "bank": "?", "country": "?", "flag": "🌍"}
-
-    # ── 3. Try sources in order ───────────────────────────────────────────────
-    sources = [
-        f"https://lookup.binlist.net/{bin6}",
-        f"https://binlookup.io/api/bin/{bin6}",
-    ]
+    HDR   = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
     result = None
-    for url in sources:
-        try:
-            r = requests.get(url, timeout=6,
-                             headers={"Accept-Version": "3",
-                                      "User-Agent": "Mozilla/5.0"})
-            if r.status_code == 429:
-                time.sleep(1.5)
-                continue
-            if r.status_code != 200:
-                continue
+
+    # ── 2. Primary: bins.antipublic.cc (no rate limit, large DB) ─────────────
+    try:
+        r = requests.get(f"https://bins.antipublic.cc/bins/{bin6}", headers=HDR, timeout=8)
+        if r.status_code == 200:
             d = r.json()
-
-            # binlist.net schema
-            if "scheme" in d or "type" in d:
+            if d.get("brand") or d.get("bank"):
                 result = {
-                    "brand":   (d.get("scheme") or "?").upper(),
-                    "type":    (d.get("type")   or "?").upper(),
-                    "bank":    (d.get("bank")   or {}).get("name") or "?",
-                    "country": (d.get("country") or {}).get("name") or "?",
-                    "flag":    (d.get("country") or {}).get("emoji") or "🌍",
+                    "brand":   (d.get("brand")        or "?").upper(),
+                    "type":    (d.get("type")          or "?").upper(),
+                    "bank":    d.get("bank")           or "?",
+                    "country": d.get("country_name")   or d.get("country") or "?",
+                    "flag":    d.get("country_flag")   or "🌍",
                 }
-                break
+    except Exception:
+        pass
 
-            # binlookup.io schema  {"bin":{"brand":"VISA","type":"DEBIT",...}}
-            inner = d.get("bin") or d
-            if inner.get("brand") or inner.get("type"):
-                result = {
-                    "brand":   (inner.get("brand")   or "?").upper(),
-                    "type":    (inner.get("type")    or "?").upper(),
-                    "bank":    inner.get("bank_name") or inner.get("bank") or "?",
-                    "country": inner.get("country_name") or inner.get("country") or "?",
-                    "flag":    inner.get("country_flag") or "🌍",
-                }
-                break
+    # ── 3. Fallback: lookup.binlist.net ──────────────────────────────────────
+    if result is None:
+        try:
+            with _bin_cache_lock:
+                wait = 0.6 - (time.time() - _bin_last_call[0])
+                if wait > 0:
+                    time.sleep(wait)
+                _bin_last_call[0] = time.time()
+            r = requests.get(f"https://lookup.binlist.net/{bin6}",
+                             headers={**HDR, "Accept-Version": "3"}, timeout=6)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("scheme") or d.get("type"):
+                    result = {
+                        "brand":   (d.get("scheme")  or "?").upper(),
+                        "type":    (d.get("type")     or "?").upper(),
+                        "bank":    (d.get("bank")     or {}).get("name") or "?",
+                        "country": (d.get("country")  or {}).get("name") or "?",
+                        "flag":    (d.get("country")  or {}).get("emoji") or "🌍",
+                    }
         except Exception:
-            continue
+            pass
+
+    # ── 4. Fallback 2: binlookup.io ──────────────────────────────────────────
+    if result is None:
+        try:
+            r = requests.get(f"https://binlookup.io/api/bin/{bin6}", headers=HDR, timeout=6)
+            if r.status_code == 200:
+                d = r.json()
+                inner = d.get("bin") or d
+                if inner.get("brand") or inner.get("type"):
+                    result = {
+                        "brand":   (inner.get("brand")        or "?").upper(),
+                        "type":    (inner.get("type")         or "?").upper(),
+                        "bank":    inner.get("bank_name") or inner.get("bank") or "?",
+                        "country": inner.get("country_name") or inner.get("country") or "?",
+                        "flag":    inner.get("country_flag")  or "🌍",
+                    }
+        except Exception:
+            pass
 
     if result is None:
         result = EMPTY
