@@ -38,6 +38,25 @@ from telebot import types
 from collections import OrderedDict
 import logging
 
+# ── Shared utilities (modular) ──────────────────────────────────────────────
+from utils.identity import generate_identity, UA_POOL, CW_UA_POOL
+
+# ── Playwright EVPN gate (optional) ────────────────────────────────────────
+try:
+    from gates.evpn import (
+        check_evpn_gate, check_evpn_bulk,
+        evpn_screenshots, _evpn_ss_lock,
+        PLAYWRIGHT_AVAILABLE,
+    )
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    evpn_screenshots = {}
+    _evpn_ss_lock = threading.Lock()
+    def check_evpn_gate(card, proxy, fn):
+        return ("ERROR", "Playwright not installed")
+    def check_evpn_bulk(cards, pg, fn, cb=None):
+        return {c: ("ERROR", "Playwright not installed") for c in cards}
+
 # ═══════════════════════════════════════
 # إعدادات التسجيل
 # ═══════════════════════════════════════
@@ -1018,6 +1037,11 @@ GATES = {
         'type':  'cw',          # CharityWater API gate
         'site':  'https://www.charitywater.org',
     },
+    'evpn': {
+        'name':  '🔐 ExpressVPN — OTP+SCREEN',
+        'type':  'playwright',   # Playwright Stealth gate
+        # enabled flag depends on playwright being installed
+    },
     '1': {'name': '🏦 بوابة 1', 'site': 'https://copenhagensilver.com'},
     '2': {'name': '💳 بوابة 2', 'site': 'https://www.spokaneshirtco.com'},
     '3': {'name': '🔥 بوابة 3', 'site': 'https://www.4allpromos.com'},
@@ -1071,29 +1095,15 @@ CW_UA_POOL = [
 # الـ fallback لو كود آخر لا يزال يستخدم CW_UA مباشرة
 CW_UA = CW_UA_POOL[0]["ua"]
 
-CW_DOMAINS = ["hotmail.com"]*3 + ["outlook.com"]*3 + ["yahoo.com"]*2 + ["gmail.com"]
-CW_FIRSTS  = ["James","Oliver","Liam","Noah","Emma","Sophia","Lucas",
-              "Henry","Ella","Grace","Mason","Ethan","Chloe","Ryan"]
-CW_LASTS   = ["Smith","Johnson","Williams","Brown","Jones","Garcia",
-              "Miller","Davis","Wilson","Taylor","Anderson","Thomas"]
-CW_US = [
-    ("10022","NY"),("90210","CA"),("60601","IL"),("77001","TX"),
-    ("85001","AZ"),("19101","PA"),("30301","GA"),("98101","WA"),
-    ("80201","CO"),("33101","FL"),("02101","MA"),("30301","GA"),
-]
+# ── Identity helpers: موحّدة من utils/identity.py ──────────────────────────
+# generate_identity() مستوردة من الأعلى — تستخدمها CW gate + EVPN gate
+# CW_UA_POOL  مستوردة من الأعلى
 
 def _cw_uuid():
     return str(uuid.uuid4()) + secrets.token_hex(3)
 
-def _cw_identity():
-    first = random.choice(CW_FIRSTS); last = random.choice(CW_LASTS)
-    name  = "".join(random.choices(string.ascii_lowercase, k=7))
-    email = f"{name}{random.randint(10,999)}@{random.choice(CW_DOMAINS)}"
-    zp, st = random.choice(CW_US)
-    phone  = f"+1{random.randint(2020000000,9999999999)}"
-    return {"first": first, "last": last,
-            "name": f"{first} {last}", "email": email,
-            "zip": zp, "state": st, "phone": phone}
+# Backward-compat alias (check_cw_gate تستدعيه)
+_cw_identity = generate_identity
 
 def check_cw_gate(card_str, proxy=None):
     """
@@ -1395,8 +1405,16 @@ def check_cw_with_retry(card_str):
 def _check_one_card(card_str, gate_id):
     """Route card to correct checker based on gate type."""
     gate = GATES[gate_id]
-    if gate.get('type') == 'cw':
+    gtype = gate.get('type', 'woo')
+
+    if gtype == 'cw':
         return check_cw_with_retry(card_str)
+
+    if gtype == 'playwright':
+        proxy = proxy_pool.get_proxy()
+        return check_evpn_gate(card_str, proxy, generate_identity)
+
+    # Default: WooCommerce
     return check_card_with_retry(card_str, gate['site'])
 
 

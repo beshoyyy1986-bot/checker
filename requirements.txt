@@ -4,3 +4,5 @@ Flask>=2.3.0
 gunicorn
 python-dotenv>=1.0.1
 PySocks>=1.7.1
+playwright>=1.40
+playwright-stealth>=2.0.0
