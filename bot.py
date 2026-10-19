@@ -3008,16 +3008,24 @@ if __name__ == '__main__':
     sys.stdout.flush()
 
     # ── حل مشكلة 409 Conflict ────────────────────────────────────────────────
-    # 409 بيحصل لما instance قديم لسّه شغّال (عند redeploy).
-    # الحل: امسح الـ webhook + pending + انتظر حتى الـ instance القديم يموت.
-    for _attempt in range(10):
+    # pyTelegramBotAPI 4.x لا يدعم drop_pending_updates في remove_webhook
+    # لذلك نستدعي Telegram API مباشرة بـ requests
+    try:
+        import requests as _req
+        _req.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": True},
+            timeout=10,
+        )
+        logger.info("deleteWebhook(drop_pending_updates=True) — OK")
+    except Exception as _e:
+        logger.warning(f"deleteWebhook direct call failed: {_e}")
+        # Fallback: المكتبة بدون drop_pending
         try:
-            bot.remove_webhook(drop_pending_updates=True)
-            time.sleep(2)   # فرصة للـ instance القديم إنه يتوقف
-            break
-        except Exception as e:
-            logger.warning(f"remove_webhook attempt {_attempt+1}: {e}")
-            time.sleep(3)
+            bot.remove_webhook()
+        except Exception:
+            pass
+    time.sleep(2)   # فرصة للـ instance القديم إنه يتوقف
 
     print("Bot polling started. Press Ctrl+C to stop.")
     sys.stdout.flush()
