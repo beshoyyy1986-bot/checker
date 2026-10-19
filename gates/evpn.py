@@ -9,6 +9,7 @@ gates/evpn.py
 - البروكسيات: نفس pool البوت العام
 """
 
+import os
 import time
 import random
 import threading
@@ -56,6 +57,12 @@ _evpn_ss_lock = threading.Lock()
 # ────────────────────────────────────────────────────────────────────────────
 # Proxy helpers
 # ────────────────────────────────────────────────────────────────────────────
+_BRIGHTDATA_HOST_SUFFIX = "superproxy.io"
+# HTTP(S) port of the Bright Data endpoint (the SOCKS5 port is 22228).
+# Override with BRIGHTDATA_HTTP_PORT if the zone uses a different port.
+_BRIGHTDATA_HTTP_PORT = os.environ.get("BRIGHTDATA_HTTP_PORT", "22225").strip() or "22225"
+
+
 def _pw_proxy(proxy_str: str | None) -> dict | None:
     """Convert any proxy string → playwright proxy dict."""
     if not proxy_str:
@@ -66,14 +73,29 @@ def _pw_proxy(proxy_str: str | None) -> dict | None:
         s = "socks5://" + s[len("socks5h://"):]
 
     if "://" in s:
-        from urllib.parse import urlparse
+        from urllib.parse import urlparse, unquote
         p = urlparse(s)
         scheme    = p.scheme
-        host_port = f"{p.hostname}:{p.port}"
-        result    = {"server": f"{scheme}://{host_port}"}
+        host      = p.hostname
+        port      = p.port
+
+        # Chromium rejects SOCKS5 proxies that require username/password.
+        # For Bright Data, use the HTTP endpoint of the same host instead
+        # (same credentials, same session username → same rotating IP).
+        if scheme.startswith("socks5") and p.username:
+            if host and host.endswith(_BRIGHTDATA_HOST_SUFFIX):
+                scheme = "http"
+                port   = _BRIGHTDATA_HTTP_PORT
+            else:
+                logger.warning(
+                    f"[EVPN] socks5 proxy with credentials on {host}:{port} is not "
+                    f"supported by Chromium; browser launch will likely fail"
+                )
+
+        result = {"server": f"{scheme}://{host}:{port}"}
         if p.username:
-            result["username"] = p.username
-            result["password"] = p.password or ""
+            result["username"] = unquote(p.username)
+            result["password"] = unquote(p.password or "")
         return result
 
     if "@" in s:
@@ -379,7 +401,11 @@ def _run_session(cards_batch: list, proxy_str: str | None, identity_fn) -> dict:
         try:
             browser = pw.chromium.launch(**launch_args)
         except Exception as exc:
-            logger.error(f"[EVPN] browser launch failed: {exc}")
+            _srv = pw_proxy["server"] if pw_proxy else "none"
+            logger.error(
+                f"[EVPN] browser launch failed (proxy server: {_srv}): "
+                f"{type(exc).__name__}: {exc}"
+            )
             for c in cards_batch:
                 results[c] = ("ERROR", f"Browser launch: {str(exc)[:60]}")
             return results
