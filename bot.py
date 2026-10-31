@@ -126,6 +126,7 @@ def init_db():
     # default settings
     c.execute("INSERT OR IGNORE INTO bot_settings (key,value) VALUES ('send_mode','all')")
     c.execute("INSERT OR IGNORE INTO bot_settings (key,value) VALUES ('bulk_threads','5')")
+    c.execute("INSERT OR IGNORE INTO bot_settings (key,value) VALUES ('cw_threads','2')")
     conn.commit()
     conn.close()
 
@@ -443,9 +444,24 @@ print(f"Proxy pool initialized — Bright Data rotating sessions: {'ENABLED' if 
 sys.stdout.flush()
 
 # ── CharityWater Rate-Limit Guard ─────────────────────────────────────────────
-# CW ترد بـ 418 لو طلبات كتيرة وصلت لـ /donate/stripe في نفس الوقت.
-# السيمافور بيحدد أقصى عدد checks متوازية = 2 فقط (قلّلنا من 3 لتقليل الـ 418).
-_CW_SEMAPHORE = threading.Semaphore(2)
+# السيمافور بيحدد أقصى عدد CW checks متوازية — قابل للتعديل من Settings (cw_threads)
+_CW_SEMAPHORE   = threading.Semaphore(2)
+_CW_SEMAPHORE_N = 2
+_cw_sem_lock    = threading.Lock()
+
+def get_cw_semaphore():
+    """يرجع السيمافور الحالي، ويعيد إنشاءه لو الأدمن غيّر العدد من Settings"""
+    global _CW_SEMAPHORE, _CW_SEMAPHORE_N
+    try:
+        n = int(get_setting('cw_threads', '2'))
+    except Exception:
+        n = 2
+    n = max(1, min(n, 20))
+    with _cw_sem_lock:
+        if n != _CW_SEMAPHORE_N:
+            _CW_SEMAPHORE   = threading.Semaphore(n)
+            _CW_SEMAPHORE_N = n
+    return _CW_SEMAPHORE
 
 # ═══════════════════════════════════════
 # سحب بروكسيات GitHub
@@ -1356,7 +1372,7 @@ def check_cw_with_retry(card_str):
     for i, use_proxy in enumerate(attempts):
         proxy = proxy_pool.get_proxy() if use_proxy else None
         try:
-            with _CW_SEMAPHORE:   # ← max 3 concurrent CW checks
+            with get_cw_semaphore():   # ← العدد من Settings (cw_threads)
                 status, reason = check_cw_gate(card_str, proxy)
         except Exception as e:
             status, reason = "ERROR", f"{type(e).__name__}: {str(e)[:120]}"
@@ -1518,30 +1534,36 @@ admin_session      = {}   # {user_id: admin_state}
 user_bulk_results  = {}   # {user_id: [result_lines]} for export
 
 # ═══════════════════════════════════════
-# إدارة الإيقاف المبكر (Stop/Cancel)
+# إدارة الإيقاف المبكر (Stop/Cancel) باستخدام Generation ID
 # ═══════════════════════════════════════
-_user_stop_events = {}    # {user_id: threading.Event()}
+_user_task_gen  = {}    # {user_id: int}
+_user_task_stop = {}    # {user_id: threading.Event()}
 
 
-def reset_stop_event(user_id):
-    """إشارة إيقاف للمهمة القديمة ثم إنشاء event جديد"""
-    ev = _user_stop_events.get(user_id)
+def start_task(user_id):
+    """تسجيل مهمة جديدة للمستخدم وإشارة إيقاف للمهمة القديمة"""
+    ev = _user_task_stop.get(user_id)
     if ev:
         ev.set()
-    # ننتظر شوية عشان المهمة القديمة تلاحظ الإشارة وتوقف
-    time.sleep(0.8)
-    _user_stop_events[user_id] = threading.Event()
+    # ننتظر عشان المهمة القديمة تلاحظ الإشارة وتوقف
+    time.sleep(0.6)
+    _user_task_gen[user_id] = _user_task_gen.get(user_id, 0) + 1
+    _user_task_stop[user_id] = threading.Event()
+    return _user_task_gen[user_id]
 
 
-def is_stopped(user_id):
-    """هل طلب المستخدم إيقاف المهمة الحالية؟"""
-    ev = _user_stop_events.get(user_id)
+def is_stopped(user_id, gen):
+    """هل طلب المستخدم إيقاف المهمة الحالية أو بدأ مهمة أحدث؟"""
+    cur_gen = _user_task_gen.get(user_id)
+    if cur_gen != gen:
+        return True
+    ev = _user_task_stop.get(user_id)
     return ev is not None and ev.is_set()
 
 
 def stop_user_task(user_id):
     """إشارة إيقاف للمهمة الحالية للمستخدم"""
-    ev = _user_stop_events.get(user_id)
+    ev = _user_task_stop.get(user_id)
     if ev:
         ev.set()
 
@@ -2113,6 +2135,9 @@ def handle_text(message):
     except:
         pass
 
+    # أي رسالة/أمر جديد يوقف أي فحص قديم شغال — زي ما يكون المستخدم ضغط إيقاف
+    stop_user_task(user_id)
+
     # ─── كود التفعيل ───
     if state == 'awaiting_redeem_code':
         user_session_state.pop(user_id, None)
@@ -2362,12 +2387,12 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
     gate_name = GATES[gate_id]['name']
     is_cw = GATES[gate_id].get('type') == 'cw'
 
-    # أعد تعيين event الإيقاف لكل فحص جديد
-    reset_stop_event(user_id)
+    # سجّل مهمة جديدة — أي فحص قديم هيتوقف
+    task_gen = start_task(user_id)
 
     frames = ["⏳", "⌛"]
     for i in range(3):
-        if is_stopped(user_id):
+        if is_stopped(user_id, task_gen):
             break
         try:
             bot.edit_message_caption(
@@ -2386,8 +2411,21 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
         time.sleep(0.6)
 
     status, reason = "STOPPED", "Task cancelled by user."
-    if not is_stopped(user_id):
+    if not is_stopped(user_id, task_gen):
         status, reason = _check_one_card(card_str, gate_id)
+
+    # لو المهمة اتوقفت، نرجع للقائمة ومنبعتش نتيجة
+    if is_stopped(user_id, task_gen):
+        try:
+            edit_banner(user_id, chat_id, MAIN_CAPTION, main_menu_kb(user_id), msg_id=msg_id)
+        except:
+            pass
+        try:
+            bot.send_message(chat_id, "⏹ *Task stopped by user.*", parse_mode="Markdown")
+        except:
+            pass
+        return
+
     bin6    = card_str.split('|')[0][:6]
     bin_inf = get_bin_info(bin6)
 
@@ -2430,8 +2468,8 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
     is_cw     = GATES[gate_id].get('type') == 'cw'
     send_mode = get_setting('send_mode', 'all')  # 'all' or 'hits_only'
 
-    # أعد تعيين event الإيقاف لكل فحص جديد
-    reset_stop_event(user_id)
+    # سجّل مهمة جديدة — أي فحص قديم هيتوقف
+    task_gen = start_task(user_id)
 
     res  = {'hits': 0, 'declined': 0, 'error': 0, 'done': 0}
     lock = threading.Lock()
@@ -2471,7 +2509,7 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
     push_progress()
 
     def process_one(card):
-        if is_stopped(user_id):
+        if is_stopped(user_id, task_gen):
             return "STOPPED", "Task cancelled by user."
         status, reason = _check_one_card(card, gate_id)
         bin6    = card.split('|')[0][:6]
@@ -2498,6 +2536,10 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
             should_send = is_hit
         else:  # 'all'
             should_send = True   # hits + declined + errors (so user sees the problem)
+
+        # لو المهمة اتوقفت، متبعتش نتيجة
+        if is_stopped(user_id, task_gen):
+            return status
 
         if not should_send:
             return status
@@ -2539,7 +2581,7 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
         futures = {ex.submit(process_one, card): card for card in cards}
         for future in as_completed(futures):
             # إذا طلب المستخدم الإيقاف، نلغي المهام المتبقية
-            if is_stopped(user_id):
+            if is_stopped(user_id, task_gen):
                 for f in futures:
                     f.cancel()
                 break
@@ -2561,8 +2603,8 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
         pass
 
     # Summary message
-    stopped = is_stopped(user_id)
-    title = "🏁 *Check Stopped!*" if stopped else "🏁 *Check Complete!*"
+    stopped = is_stopped(user_id, task_gen)
+    title = "⏹ *Check Stopped!*" if stopped else "🏁 *Check Complete!*"
     cap = (
         f"{title}\n\n"
         f"🏦 Gateway: {gate_name}\n"
@@ -2623,8 +2665,8 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
     lock      = threading.Lock()
     last_edit = [0.0]
 
-    # أعد تعيين event الإيقاف لكل فحص جديد
-    reset_stop_event(user_id)
+    # سجّل مهمة جديدة — أي فحص قديم هيتوقف
+    task_gen = start_task(user_id)
 
     def push_progress(force=False):
         now = time.time()
@@ -2672,7 +2714,7 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
         pass
 
     def process_url(url):
-        if is_stopped(user_id):
+        if is_stopped(user_id, task_gen):
             return
         result, code = scan_single_url(url)
         with lock:
@@ -2687,6 +2729,10 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
                 res['found'] += 1
             res['done'] += 1
         push_progress()
+
+        # لو المهمة اتوقفت، متبعتش نتيجة
+        if is_stopped(user_id, task_gen):
+            return
 
         # ✅ Unprotected site with gateway
         if result and not result['captcha'] and not result['cloudflare']:
@@ -2726,7 +2772,7 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
         futures = {ex.submit(process_url, url): url for url in urls}
         for future in as_completed(futures):
             # إذا طلب المستخدم الإيقاف، نلغي المهام المتبقية
-            if is_stopped(user_id):
+            if is_stopped(user_id, task_gen):
                 for f in futures:
                     f.cancel()
                 break
@@ -2745,8 +2791,10 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
         pass
 
     # Final summary
+    stopped = is_stopped(user_id, task_gen)
+    scan_title = "⏹ *Gate Scan Stopped!*" if stopped else "🏁 *Gate Scan Complete!*"
     summary = (
-        f"🏁 *Gate Scan Complete!*\n\n"
+        f"{scan_title}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 Total:               *{total}* sites\n"
         f"✅ Unprotected gateway: *{res['found']}*\n"
@@ -2786,11 +2834,17 @@ def _show_settings(user_id, chat_id, mid):
     a, b, d = proxy_pool.get_stats()
     cached  = len(_bin_cache)
 
+    cw_threads     = int(get_setting('cw_threads', '2'))
+    next_cw        = {1: 2, 2: 3, 3: 5, 5: 8, 8: 10, 10: 1}.get(cw_threads, 2)
+
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(btn(f"📤 Send Mode: {mode_label}  (tap to toggle)",
                STYLE_PRIMARY, callback_data=f"setting_sendmode_{mode_next}"))
     kb.add(btn(f"⚡ Threads: {threads}  (tap to cycle: {next_threads} next)",
                STYLE_PRIMARY, callback_data=f"setting_threads_{next_threads}"))
+    if user_id == ADMIN_ID:
+        kb.add(btn(f"🌊 CW Threads: {cw_threads}  (tap to cycle: {next_cw} next)",
+                   STYLE_PRIMARY, callback_data=f"setting_cwthreads_{next_cw}"))
     kb.add(btn(f"📡 Proxies — 🟢{a} 🟡{b} 🔴{d}",
                STYLE_PRIMARY, callback_data="setting_proxy_info"))
     if user_id == ADMIN_ID:
@@ -2806,6 +2860,8 @@ def _show_settings(user_id, chat_id, mid):
         f"  • `hits_only`  → Charged / Approved only\n\n"
         f"⚡ *Bulk Threads:* `{threads}`  (3 / 5 / 10)\n"
         f"  Higher = faster bulk, but more API load\n\n"
+        f"🌊 *CW Threads:* `{cw_threads}`  (1 / 2 / 3 / 5 / 8 / 10)\n"
+        f"  CharityWater max concurrent — أعلى = أسرع لكن 418 أكتر\n\n"
         f"📡 *Proxies:* 🟢{a}  🟡{b}  🔴{d}\n"
         f"🔢 *BIN Cache:* {cached} entries\n"
         "━━━━━━━━━━━━━━━━━━━━━━"
@@ -2820,6 +2876,19 @@ def cb_setting_threads(call):
     n = call.data.split("setting_threads_")[1]
     set_setting('bulk_threads', n)
     bot.answer_callback_query(call.id, f"⚡ Threads → {n}")
+    _show_settings(user_id, chat_id, mid)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("setting_cwthreads_"))
+def cb_setting_cwthreads(call):
+    user_id = call.from_user.id
+    if user_id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "⛔ Admin only.")
+        return
+    chat_id = call.message.chat.id
+    mid     = call.message.message_id
+    n = call.data.split("setting_cwthreads_")[1]
+    set_setting('cw_threads', n)
+    bot.answer_callback_query(call.id, f"🌊 CW Threads → {n}")
     _show_settings(user_id, chat_id, mid)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("setting_sendmode_"))
