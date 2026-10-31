@@ -1518,6 +1518,34 @@ admin_session      = {}   # {user_id: admin_state}
 user_bulk_results  = {}   # {user_id: [result_lines]} for export
 
 # ═══════════════════════════════════════
+# إدارة الإيقاف المبكر (Stop/Cancel)
+# ═══════════════════════════════════════
+_user_stop_events = {}    # {user_id: threading.Event()}
+
+
+def reset_stop_event(user_id):
+    """إشارة إيقاف للمهمة القديمة ثم إنشاء event جديد"""
+    ev = _user_stop_events.get(user_id)
+    if ev:
+        ev.set()
+    # ننتظر شوية عشان المهمة القديمة تلاحظ الإشارة وتوقف
+    time.sleep(0.8)
+    _user_stop_events[user_id] = threading.Event()
+
+
+def is_stopped(user_id):
+    """هل طلب المستخدم إيقاف المهمة الحالية؟"""
+    ev = _user_stop_events.get(user_id)
+    return ev is not None and ev.is_set()
+
+
+def stop_user_task(user_id):
+    """إشارة إيقاف للمهمة الحالية للمستخدم"""
+    ev = _user_stop_events.get(user_id)
+    if ev:
+        ev.set()
+
+# ═══════════════════════════════════════
 # نص القائمة الرئيسية
 # ═══════════════════════════════════════
 MAIN_CAPTION = (
@@ -1604,6 +1632,13 @@ def main_menu_kb(user_id=None):
 def back_kb():
     kb = types.InlineKeyboardMarkup()
     kb.add(btn("🏠 Main Menu", STYLE_DANGER, callback_data="main_menu"))
+    return kb
+
+
+def stop_kb():
+    """كيبورد زر الإيقاف أثناء الفحص"""
+    kb = types.InlineKeyboardMarkup()
+    kb.add(btn("⏹ Stop", STYLE_DANGER, callback_data="stop_task"))
     return kb
 
 def gates_kb(mode):
@@ -1728,8 +1763,10 @@ def cmd_start(message):
         bot.delete_message(chat_id, message.message_id)
     except:
         pass
+    # /start يلغي أي فحص/عملية حالية
+    stop_user_task(user_id)
     user_session_state.pop(user_id, None)
-    
+
     # Ensure user exists in database
     conn = db()
     c = conn.cursor()
@@ -2147,10 +2184,28 @@ def cb_main_menu(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
     mid     = call.message.message_id
+    # أي أمر للقائمة الرئيسية يلغي الفحص الحالي
+    stop_user_task(user_id)
     user_session_state.pop(user_id, None)
     user_main_message[user_id] = mid
     edit_banner(user_id, chat_id, MAIN_CAPTION, main_menu_kb(user_id), msg_id=mid)
     bot.answer_callback_query(call.id)
+
+
+# ═══════════════════════════════════════
+# Callback: إيقاف المهمة الحالية
+# ═══════════════════════════════════════
+@bot.callback_query_handler(func=lambda c: c.data == "stop_task")
+def cb_stop_task(call):
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    stop_user_task(user_id)
+    bot.answer_callback_query(call.id, " Stopping current task...")
+    # نزيل زر الإيقاف بعد الضغط عليه
+    try:
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
 
 # ═══════════════════════════════════════
 # Callback: فحص كارت واحد
@@ -2307,8 +2362,13 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
     gate_name = GATES[gate_id]['name']
     is_cw = GATES[gate_id].get('type') == 'cw'
 
+    # أعد تعيين event الإيقاف لكل فحص جديد
+    reset_stop_event(user_id)
+
     frames = ["⏳", "⌛"]
     for i in range(3):
+        if is_stopped(user_id):
+            break
         try:
             bot.edit_message_caption(
                 caption=(
@@ -2318,14 +2378,16 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
                     f"▶️▶️ Please wait..."
                 ),
                 chat_id=chat_id, message_id=msg_id,
-                reply_markup=types.InlineKeyboardMarkup(),
+                reply_markup=stop_kb(),
                 parse_mode="Markdown"
             )
         except:
             pass
         time.sleep(0.6)
 
-    status, reason = _check_one_card(card_str, gate_id)
+    status, reason = "STOPPED", "Task cancelled by user."
+    if not is_stopped(user_id):
+        status, reason = _check_one_card(card_str, gate_id)
     bin6    = card_str.split('|')[0][:6]
     bin_inf = get_bin_info(bin6)
 
@@ -2368,15 +2430,18 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
     is_cw     = GATES[gate_id].get('type') == 'cw'
     send_mode = get_setting('send_mode', 'all')  # 'all' or 'hits_only'
 
+    # أعد تعيين event الإيقاف لكل فحص جديد
+    reset_stop_event(user_id)
+
     res  = {'hits': 0, 'declined': 0, 'error': 0, 'done': 0}
     lock = threading.Lock()
     last_edit  = [0.0]
     result_log = []   # for export
 
-    def push_progress():
+    def push_progress(force=False):
         now = time.time()
         with lock:
-            if now - last_edit[0] < 2.5 and res['done'] < total:
+            if not force and now - last_edit[0] < 2.5 and res['done'] < total:
                 return
             last_edit[0] = now
             done = res['done']
@@ -2397,7 +2462,7 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
         try:
             bot.edit_message_caption(
                 caption=cap, chat_id=chat_id, message_id=msg_id,
-                reply_markup=types.InlineKeyboardMarkup(),
+                reply_markup=stop_kb(),
                 parse_mode="Markdown"
             )
         except:
@@ -2406,6 +2471,8 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
     push_progress()
 
     def process_one(card):
+        if is_stopped(user_id):
+            return "STOPPED", "Task cancelled by user."
         status, reason = _check_one_card(card, gate_id)
         bin6    = card.split('|')[0][:6]
         bin_inf = get_bin_info(bin6)
@@ -2471,6 +2538,11 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(process_one, card): card for card in cards}
         for future in as_completed(futures):
+            # إذا طلب المستخدم الإيقاف، نلغي المهام المتبقية
+            if is_stopped(user_id):
+                for f in futures:
+                    f.cancel()
+                break
             try:
                 future.result()
             except Exception as e:
@@ -2489,8 +2561,10 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
         pass
 
     # Summary message
+    stopped = is_stopped(user_id)
+    title = "🏁 *Check Stopped!*" if stopped else "🏁 *Check Complete!*"
     cap = (
-        f"🏁 *Check Complete!*\n\n"
+        f"{title}\n\n"
         f"🏦 Gateway: {gate_name}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 Total:    *{total}*\n"
@@ -2549,10 +2623,13 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
     lock      = threading.Lock()
     last_edit = [0.0]
 
-    def push_progress():
+    # أعد تعيين event الإيقاف لكل فحص جديد
+    reset_stop_event(user_id)
+
+    def push_progress(force=False):
         now = time.time()
         with lock:
-            if now - last_edit[0] < 2.5 and res['done'] < total:
+            if not force and now - last_edit[0] < 2.5 and res['done'] < total:
                 return
             last_edit[0] = now
             done = res['done']
@@ -2573,7 +2650,7 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
         try:
             bot.edit_message_caption(
                 caption=cap, chat_id=chat_id, message_id=msg_id,
-                reply_markup=types.InlineKeyboardMarkup(),
+                reply_markup=stop_kb(),
                 parse_mode="Markdown"
             )
         except:
@@ -2588,13 +2665,15 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
                 f"⏳ Please wait..."
             ),
             chat_id=chat_id, message_id=msg_id,
-            reply_markup=types.InlineKeyboardMarkup(),
+            reply_markup=stop_kb(),
             parse_mode="Markdown"
         )
     except:
         pass
 
     def process_url(url):
+        if is_stopped(user_id):
+            return
         result, code = scan_single_url(url)
         with lock:
             if result is None:
@@ -2646,6 +2725,11 @@ def scan_gates_ui(urls, chat_id, user_id, msg_id):
     with ThreadPoolExecutor(max_workers=max_w) as ex:
         futures = {ex.submit(process_url, url): url for url in urls}
         for future in as_completed(futures):
+            # إذا طلب المستخدم الإيقاف، نلغي المهام المتبقية
+            if is_stopped(user_id):
+                for f in futures:
+                    f.cancel()
+                break
             try:
                 future.result()
             except Exception as e:
