@@ -1034,6 +1034,11 @@ GATES = {
         'type':  'cw',          # CharityWater API gate
         'site':  'https://www.charitywater.org',
     },
+    'cs': {
+        'name':  '📸 CHECK + SCREEN (VPN)',
+        'type':  'cs',          # Playwright screenshot gate
+        'site':  'https://order.veepn.com/en/vpn/buy/monthly',
+    },
     '1': {'name': '🏦 بوابة 1', 'site': 'https://copenhagensilver.com'},
     '2': {'name': '💳 بوابة 2', 'site': 'https://www.spokaneshirtco.com'},
     '3': {'name': '🔥 بوابة 3', 'site': 'https://www.4allpromos.com'},
@@ -1413,7 +1418,78 @@ def _check_one_card(card_str, gate_id):
     gate = GATES[gate_id]
     if gate.get('type') == 'cw':
         return check_cw_with_retry(card_str)
+    if gate.get('type') == 'cs':
+        return _check_cs_card(card_str)
     return check_card_with_retry(card_str, gate['site'])
+
+
+def _check_cs_card(card_str):
+    """
+    Wrapper for CS (CHECK + SCREEN) gate.
+    Returns (status, reason) — screenshot is retrieved separately via _check_cs_card_with_screenshot.
+    """
+    try:
+        from gate_cs import check_cs_card_sync, CS_EMAIL
+        status, reason, _ss = check_cs_card_sync(
+            card_str,
+            CS_EMAIL,
+            get_proxy_fn=proxy_pool.get_proxy,
+        )
+        return status, reason
+    except Exception as e:
+        logger.error(f"[CS] wrapper error: {e}")
+        return "ERROR", f"{type(e).__name__}: {str(e)[:80]}"
+
+
+def _check_cs_card_with_screenshot(card_str):
+    """
+    CS gate call that also returns screenshot bytes.
+    Returns (status, reason, screenshot_bytes_or_None).
+    """
+    try:
+        from gate_cs import check_cs_card_sync, CS_EMAIL
+        return check_cs_card_sync(
+            card_str,
+            CS_EMAIL,
+            get_proxy_fn=proxy_pool.get_proxy,
+        )
+    except Exception as e:
+        logger.error(f"[CS] screenshot wrapper error: {e}")
+        return "ERROR", f"{type(e).__name__}: {str(e)[:80]}", None
+
+
+# ── CS STATUS labels (screenshot gate) ──────────────────────────────────────
+CS_STATUS_LABEL = {
+    "APPROVED":  ("✅", "APPROVED"),
+    "OTP":       ("🔐", "OTP / 3D Secure Screen"),
+    "DECLINED":  ("❌", "DECLINED"),
+    "UNKNOWN":   ("❓", "Unknown — See Screenshot"),
+    "ERROR":     ("⚠️", "Error"),
+}
+STATUS_LABEL.update(CS_STATUS_LABEL)
+
+
+def format_cs_result(status, reason, card_str, bin_inf):
+    """Format CS gate result text (screenshot sent separately)."""
+    icon, label = CS_STATUS_LABEL.get(status, ("⚠️", status))
+    bin6  = card_str.split('|')[0][:6]
+    brand = (bin_inf.get('brand') or '?').upper()
+    ctype = (bin_inf.get('type')  or '?').upper()
+    bank  = bin_inf.get('bank',    'Unknown')
+    cntry = (bin_inf.get('country') or 'Unknown').upper()
+    flag  = bin_inf.get('flag', '🌍')
+    safe_reason = md_escape(str(reason or ''))[:200]
+    return (
+        f"{icon} *{label}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"𝐂𝐚𝐫𝐝 ➜ `{card_str}`\n"
+        f"𝐁𝐈𝐍 ➜ {bin6} - {ctype} - {brand}\n"
+        f"𝐂𝐨𝐮𝐧𝐭𝐫𝐲 ➜ {cntry} - {flag}\n"
+        f"𝐁𝐚𝐧𝐤 ➜ {md_escape(bank)}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        + (f"📄 _{safe_reason}_\n━━━━━━━━━━━━━━━━━━━━━━\n" if safe_reason else "")
+        + "Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
+    )
 
 
 def format_cw_result(status, reason, card_str, bin_inf):
@@ -1438,8 +1514,11 @@ def format_cw_result(status, reason, card_str, bin_inf):
 
 
 def _is_hit(status, gate_id):
-    if GATES[gate_id].get('type') == 'cw':
+    gtype = GATES[gate_id].get('type')
+    if gtype == 'cw':
         return status in ('CHARGED', 'APPROVED')
+    if gtype == 'cs':
+        return status in ('APPROVED', 'OTP')
     return status in ('PASSED', 'OTP', 'LIVE', 'CCN')
 
 
@@ -1666,7 +1745,7 @@ def stop_kb():
 def gates_kb(mode):
     kb = types.InlineKeyboardMarkup(row_width=1)
     for gid, info in GATES.items():
-        style = STYLE_SUCCESS if gid == 'new' else STYLE_PRIMARY
+        style = STYLE_SUCCESS if gid in ('new', 'cs') else STYLE_PRIMARY
         kb.add(btn(info['name'], style, callback_data=f"gate_{gid}_{mode}"))
     kb.add(btn("🏠 Main Menu", STYLE_DANGER, callback_data="main_menu"))
     return kb
@@ -2385,7 +2464,9 @@ def cb_gate(call):
 # ═══════════════════════════════════════
 def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
     gate_name = GATES[gate_id]['name']
-    is_cw = GATES[gate_id].get('type') == 'cw'
+    gate_type = GATES[gate_id].get('type')
+    is_cw = gate_type == 'cw'
+    is_cs = gate_type == 'cs'
 
     # سجّل مهمة جديدة — أي فحص قديم هيتوقف
     task_gen = start_task(user_id)
@@ -2411,8 +2492,12 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
         time.sleep(0.6)
 
     status, reason = "STOPPED", "Task cancelled by user."
+    screenshot = None
     if not is_stopped(user_id, task_gen):
-        status, reason = _check_one_card(card_str, gate_id)
+        if is_cs:
+            status, reason, screenshot = _check_cs_card_with_screenshot(card_str)
+        else:
+            status, reason = _check_one_card(card_str, gate_id)
 
     # لو المهمة اتوقفت، نرجع للقائمة ومنبعتش نتيجة
     if is_stopped(user_id, task_gen):
@@ -2436,8 +2521,32 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
         pass
 
     # Build result message
-    if is_cw:
+    if is_cs:
+        result_msg = format_cs_result(status, reason, card_str, bin_inf)
+        # بعت الـ screenshot كصورة لو موجود
+        if screenshot:
+            try:
+                import io as _io
+                buf = _io.BytesIO(screenshot)
+                buf.name = "screenshot.png"
+                bot.send_photo(chat_id, buf, caption=result_msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"[CS] send_photo error: {e}")
+                try:
+                    bot.send_message(chat_id, result_msg, parse_mode="Markdown")
+                except Exception as e2:
+                    logger.error(f"single card result error: {e2}")
+        else:
+            try:
+                bot.send_message(chat_id, result_msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"single card result error: {e}")
+    elif is_cw:
         result_msg = format_cw_result(status, reason, card_str, bin_inf)
+        try:
+            bot.send_message(chat_id, result_msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"single card result error: {e}")
     else:
         icon, label  = STATUS_LABEL.get(status, ("❌", "DECLINED"))
         safe_reason  = md_escape(reason)[:180] if reason else ""
@@ -2453,11 +2562,10 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
         if safe_reason:
             result_msg += f"📄 _{safe_reason}_\n━━━━━━━━━━━━━━━━━━━━━━\n"
         result_msg += "Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
-
-    try:
-        bot.send_message(chat_id, result_msg, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"single card result error: {e}")
+        try:
+            bot.send_message(chat_id, result_msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"single card result error: {e}")
 
 # ═══════════════════════════════════════
 # فحص مجموعة كروت (thread) مع Progress Bar
@@ -2465,7 +2573,9 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
 def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
     total     = len(cards)
     gate_name = GATES[gate_id]['name']
-    is_cw     = GATES[gate_id].get('type') == 'cw'
+    gate_type = GATES[gate_id].get('type')
+    is_cw     = gate_type == 'cw'
+    is_cs     = gate_type == 'cs'
     send_mode = get_setting('send_mode', 'all')  # 'all' or 'hits_only'
 
     # سجّل مهمة جديدة — أي فحص قديم هيتوقف
@@ -2508,90 +2618,142 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
 
     push_progress()
 
-    def process_one(card):
-        if is_stopped(user_id, task_gen):
-            return "STOPPED", "Task cancelled by user."
-        status, reason = _check_one_card(card, gate_id)
-        bin6    = card.split('|')[0][:6]
-        bin_inf = get_bin_info(bin6)
-        is_hit  = _is_hit(status, gate_id)
+    # ── CS bulk: uses run_cs_sessions (session-batched Playwright) ───────────
+    if is_cs:
+        def _cs_on_result(card, status, reason, screenshot):
+            if is_stopped(user_id, task_gen):
+                return
+            bin6    = card.split('|')[0][:6]
+            bin_inf = get_bin_info(bin6)
+            is_hit  = _is_hit(status, gate_id)
 
-        with lock:
-            if is_hit:
-                res['hits'] += 1
-            elif status == 'DECLINED':
-                res['declined'] += 1
-            else:
-                res['error'] += 1
-            res['done'] += 1
-            icon, label = STATUS_LABEL.get(status, ("⚠️", status))
-            result_log.append(
-                f"[{status}] {card} | {reason}"
+            with lock:
+                if is_hit:
+                    res['hits'] += 1
+                elif status in ('DECLINED', 'UNKNOWN'):
+                    res['declined'] += 1
+                else:
+                    res['error'] += 1
+                res['done'] += 1
+                result_log.append(f"[{status}] {card} | {reason}")
+            push_progress()
+
+            if send_mode == 'hits_only' and not is_hit:
+                return
+            if is_stopped(user_id, task_gen):
+                return
+
+            msg_text = format_cs_result(status, reason, card, bin_inf)
+            try:
+                if screenshot:
+                    import io as _io
+                    buf = _io.BytesIO(screenshot)
+                    buf.name = "screenshot.png"
+                    bot.send_photo(chat_id, buf, caption=msg_text, parse_mode="Markdown")
+                else:
+                    bot.send_message(chat_id, msg_text, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"[CS] bulk send error: {e}")
+                try:
+                    bot.send_message(chat_id, msg_text, parse_mode="Markdown")
+                except Exception as e2:
+                    logger.error(f"[CS] bulk send fallback error: {e2}")
+
+        def _cs_is_stopped():
+            return is_stopped(user_id, task_gen)
+
+        try:
+            from gate_cs import run_cs_sessions, CS_EMAIL
+            run_cs_sessions(
+                cards, CS_EMAIL,
+                get_proxy_fn=proxy_pool.get_proxy,
+                on_result_cb=_cs_on_result,
+                is_stopped_fn=_cs_is_stopped,
             )
-        push_progress()
+        except Exception as e:
+            logger.error(f"[CS] run_cs_sessions error: {e}")
+            with lock:
+                while res['done'] < total:
+                    res['error'] += 1
+                    res['done']  += 1
 
-        # Decide whether to send this result live
-        # Errors always sent in 'all' mode so user can debug what's failing
-        if send_mode == 'hits_only':
-            should_send = is_hit
-        else:  # 'all'
-            should_send = True   # hits + declined + errors (so user sees the problem)
+    else:
+        # ── Standard (CW / WooCommerce) bulk ────────────────────────────────
+        def process_one(card):
+            if is_stopped(user_id, task_gen):
+                return "STOPPED"
+            status, reason = _check_one_card(card, gate_id)
+            bin6    = card.split('|')[0][:6]
+            bin_inf = get_bin_info(bin6)
+            is_hit  = _is_hit(status, gate_id)
 
-        # لو المهمة اتوقفت، متبعتش نتيجة
-        if is_stopped(user_id, task_gen):
-            return status
+            with lock:
+                if is_hit:
+                    res['hits'] += 1
+                elif status == 'DECLINED':
+                    res['declined'] += 1
+                else:
+                    res['error'] += 1
+                res['done'] += 1
+                result_log.append(f"[{status}] {card} | {reason}")
+            push_progress()
 
-        if not should_send:
-            return status
+            if send_mode == 'hits_only':
+                should_send = is_hit
+            else:
+                should_send = True
 
-        if is_cw:
-            if status == 'ERROR':
-                # For errors show card + reason clearly
-                icon, label = STATUS_LABEL.get('ERROR', ("⚠️", "Error"))
+            if is_stopped(user_id, task_gen):
+                return status
+            if not should_send:
+                return status
+
+            if is_cw:
+                if status == 'ERROR':
+                    icon, label = STATUS_LABEL.get('ERROR', ("⚠️", "Error"))
+                    msg_text = (
+                        f"{icon} *{label}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"𝐂𝐚𝐫𝐝 ➜ `{card}`\n"
+                        f"📄 _{md_escape((reason or 'unknown')[:200])}_\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
+                    )
+                else:
+                    msg_text = format_cw_result(status, reason, card, bin_inf)
+            else:
+                icon, label = STATUS_LABEL.get(status, ("✅", status))
                 msg_text = (
-                    f"{icon} *{label}*\n"
+                    f"{icon} *{label}* | {gate_name}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"𝐂𝐚𝐫𝐝 ➜ `{card}`\n"
-                    f"📄 _{md_escape((reason or 'unknown')[:200])}_\n"
+                    f"𝐁𝐈𝐍 ➜ {bin6} - {(bin_inf.get('type') or '?').upper()} - {(bin_inf.get('brand') or '?').upper()}\n"
+                    f"𝐂𝐨𝐮𝐧𝐭𝐫𝐲 ➜ {(bin_inf.get('country') or 'Unknown').upper()} - {bin_inf.get('flag','🌍')}\n"
+                    f"𝐁𝐚𝐧𝐤 ➜ {md_escape(bin_inf.get('bank','Unknown'))}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
                 )
-            else:
-                msg_text = format_cw_result(status, reason, card, bin_inf)
-        else:
-            icon, label = STATUS_LABEL.get(status, ("✅", status))
-            msg_text = (
-                f"{icon} *{label}* | {gate_name}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"𝐂𝐚𝐫𝐝 ➜ `{card}`\n"
-                f"𝐁𝐈𝐍 ➜ {bin6} - {(bin_inf.get('type') or '?').upper()} - {(bin_inf.get('brand') or '?').upper()}\n"
-                f"𝐂𝐨𝐮𝐧𝐭𝐫𝐲 ➜ {(bin_inf.get('country') or 'Unknown').upper()} - {bin_inf.get('flag','🌍')}\n"
-                f"𝐁𝐚𝐧𝐤 ➜ {md_escape(bin_inf.get('bank','Unknown'))}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
-            )
-        try:
-            bot.send_message(chat_id, msg_text, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"bulk card send error: {e}")
-        return status
-
-    max_workers = int(get_setting('bulk_threads', '5'))
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(process_one, card): card for card in cards}
-        for future in as_completed(futures):
-            # إذا طلب المستخدم الإيقاف، نلغي المهام المتبقية
-            if is_stopped(user_id, task_gen):
-                for f in futures:
-                    f.cancel()
-                break
             try:
-                future.result()
+                bot.send_message(chat_id, msg_text, parse_mode="Markdown")
             except Exception as e:
-                logger.error(f"bulk worker error: {e}")
-                with lock:
-                    res['error'] += 1
-                    res['done']  += 1
+                logger.error(f"bulk card send error: {e}")
+            return status
+
+        max_workers = int(get_setting('bulk_threads', '5'))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(process_one, card): card for card in cards}
+            for future in as_completed(futures):
+                if is_stopped(user_id, task_gen):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"bulk worker error: {e}")
+                    with lock:
+                        res['error'] += 1
+                        res['done']  += 1
 
     # Store results for export
     user_bulk_results[user_id] = list(result_log)
