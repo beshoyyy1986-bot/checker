@@ -1477,7 +1477,8 @@ def format_cs_result(status, reason, card_str, bin_inf):
     bank  = bin_inf.get('bank',    'Unknown')
     cntry = (bin_inf.get('country') or 'Unknown').upper()
     flag  = bin_inf.get('flag', '🌍')
-    safe_reason = md_escape(str(reason or ''))[:200]
+    # Truncate before escaping so we never cut an escape sequence in half
+    safe_reason = md_escape(str(reason or '')[:200])
     return (
         f"{icon} *{label}*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1843,8 +1844,9 @@ STATUS_LABEL.update(CS_STATUS_LABEL)
 
 def md_escape(t):
     """تهريب رموز Markdown حتى لا تفسد رسالة تيليجرام"""
+    t = str(t).replace('\\', '\\\\')
     for ch in ('_', '*', '`', '['):
-        t = str(t).replace(ch, '\\' + ch)
+        t = t.replace(ch, '\\' + ch)
     return t
 
 def progress_bar(current, total, length=14):

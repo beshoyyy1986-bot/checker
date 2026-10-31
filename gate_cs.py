@@ -14,6 +14,8 @@ import time
 import random
 import logging
 import io
+import os
+import glob
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,11 @@ logger = logging.getLogger(__name__)
 CS_TARGET_URL   = "https://order.veepn.com/en/vpn/buy/monthly"
 CS_EMAIL        = "test@gmail.com"    # الإيميل الثابت — غيّره لو محتاج
 CS_SESSION_SIZE = 5                   # كروت لكل جلسة (browser واحد)
-CS_MAX_PARALLEL = 3                   # أقصى جلسات متوازية
+# A single Chromium instance already uses a lot of RAM. On small workers
+# launching several of them at once makes the Playwright driver die with
+# "Connection closed while reading from the driver". Default to 1, but allow
+# overriding via env when the worker has enough memory.
+CS_MAX_PARALLEL = max(1, int(os.getenv("CS_MAX_PARALLEL", "1")))
 
 # ─── User-Agents ───────────────────────────────────────────────────────────────
 _UA_POOL = [
@@ -74,6 +80,70 @@ def _parse_proxy_for_playwright(proxy_str):
 
     return None
 
+# ─── Runtime diagnostics ───────────────────────────────────────────────────────
+def _runtime_diag():
+    """Collect memory/browser info so launch crashes are diagnosable from logs."""
+    info = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, _, val = line.partition(":")
+                if key in ("MemTotal", "MemAvailable", "MemFree", "SwapTotal", "SwapFree"):
+                    info[key] = val.strip()
+    except Exception:
+        pass
+    for path in (
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory.current",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+    ):
+        try:
+            with open(path) as f:
+                info[os.path.basename(path)] = f.read().strip()
+        except Exception:
+            pass
+    try:
+        info["ms-playwright"] = sorted(
+            os.path.basename(p)
+            for p in glob.glob(os.path.expanduser("~/.cache/ms-playwright/*"))
+        )
+    except Exception:
+        pass
+    return info
+
+
+async def _launch_browser(async_playwright, launch_kwargs, attempts=3):
+    """
+    Start Playwright and launch Chromium, retrying if the driver dies during
+    launch (common on low-memory containers when several browsers start at once).
+    Returns (playwright, browser); the caller must stop both.
+    """
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        pw = None
+        try:
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(**launch_kwargs)
+            return pw, browser
+        except Exception as e:
+            last_err = e
+            logger.error(
+                f"[CS] chromium launch attempt {attempt}/{attempts} failed: "
+                f"{type(e).__name__}: {e}"
+            )
+            if attempt in (1, attempts):
+                logger.error(f"[CS] runtime diag: {_runtime_diag()}")
+            if pw is not None:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            if attempt < attempts:
+                await asyncio.sleep(3 * attempt)
+    raise last_err
+
+
 # ─── Core async session ─────────────────────────────────────────────────────────
 async def _session_async(cards, email, proxy_dict, on_result, is_stopped_fn=None):
     """
@@ -88,29 +158,40 @@ async def _session_async(cards, email, proxy_dict, on_result, is_stopped_fn=None
             await on_result(card, "ERROR", "playwright not installed", None)
         return
 
-    # try stealth
+    # try stealth — support both playwright-stealth 1.x and 2.x APIs
     try:
         from playwright_stealth import stealth_async
         _has_stealth = True
     except ImportError:
-        _has_stealth = False
-        logger.warning("[CS] playwright-stealth not installed — running without stealth")
+        try:
+            from playwright_stealth import Stealth
+            _stealth = Stealth()
+
+            async def stealth_async(page):
+                await _stealth.apply_stealth_async(page)
+
+            _has_stealth = True
+        except ImportError:
+            _has_stealth = False
+            logger.warning("[CS] playwright-stealth not installed — running without stealth")
 
     launch_kwargs = {
         "headless": True,
         "args": [
             "--no-sandbox",
             "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
             "--disable-blink-features=AutomationControlled",
             "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-dev-shm-usage",
         ],
     }
     if proxy_dict:
         launch_kwargs["proxy"] = proxy_dict
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(**launch_kwargs)
+    pw, browser = await _launch_browser(async_playwright, launch_kwargs)
+    try:
         context = await browser.new_context(
             user_agent=random.choice(_UA_POOL),
             viewport={"width": 1366, "height": 768},
@@ -152,8 +233,15 @@ async def _session_async(cards, email, proxy_dict, on_result, is_stopped_fn=None
 
             await on_result(card_str, status, reason, screenshot)
             await asyncio.sleep(0.5)  # small pause between cards
-
-        await browser.close()
+    finally:
+        try:
+            await browser.close()
+        except Exception:
+            pass
+        try:
+            await pw.stop()
+        except Exception:
+            pass
 
 
 async def _check_card_on_page(page, cc, month, year, cvv, email, cardholder):
