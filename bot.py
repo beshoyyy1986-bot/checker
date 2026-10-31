@@ -1466,7 +1466,6 @@ CS_STATUS_LABEL = {
     "UNKNOWN":   ("❓", "Unknown — See Screenshot"),
     "ERROR":     ("⚠️", "Error"),
 }
-STATUS_LABEL.update(CS_STATUS_LABEL)
 
 
 def format_cs_result(status, reason, card_str, bin_inf):
@@ -1839,6 +1838,8 @@ STATUS_LABEL = {
     "CHARGED":        ("✅", "CHARGED"),
     "APPROVED":       ("✅", "Approved: (insufficient)"),
 }
+# Add CS (screenshot gate) status labels
+STATUS_LABEL.update(CS_STATUS_LABEL)
 
 def md_escape(t):
     """تهريب رموز Markdown حتى لا تفسد رسالة تيليجرام"""
