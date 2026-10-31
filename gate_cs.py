@@ -52,6 +52,11 @@ def _parse_proxy_for_playwright(proxy_str):
     m = re.match(r'socks5h?://([^:@]+):([^@]+)@([^:]+):(\d+)', s)
     if m:
         user, passwd, host, port = m.groups()
+        # Playwright/Chromium does not support SOCKS5 proxies.
+        # Bright Data offers HTTP on port 22225 as an alternative to its
+        # SOCKS5 port (22228). Convert the proxy to HTTP when possible.
+        if host.endswith('.superproxy.io') and port == '22228':
+            return {"server": f"http://{host}:22225", "username": user, "password": passwd}
         return {"server": f"socks5://{host}:{port}", "username": user, "password": passwd}
 
     # http:// or https://
