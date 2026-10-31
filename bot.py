@@ -3002,8 +3002,32 @@ sys.stdout.flush()
 print("=" * 45)
 sys.stdout.flush()
 
-# Polling Mode
-if __name__ == '__main__':
+def _run_polling():
+    """تشغيل الـ polling مع retry تلقائى عند 409."""
+    while True:
+        try:
+            bot.infinity_polling(
+                timeout=30,
+                long_polling_timeout=20,
+                allowed_updates=None,
+            )
+            break   # خرج بشكل طبيعى
+        except KeyboardInterrupt:
+            print("Bot stopped by user")
+            break
+        except Exception as e:
+            err = str(e)
+            if "409" in err:
+                # instance آخر لا يزال يعمل — انتظر ثم أعد المحاولة
+                logger.warning("409 Conflict — old instance still alive, retrying in 5s...")
+                time.sleep(5)
+            else:
+                logger.error(f"Polling error: {e}")
+                time.sleep(3)
+
+
+def main():
+    """Entry point for the bot (used by bot.py and main.py)."""
     print("Starting bot in Polling mode...")
     sys.stdout.flush()
 
@@ -3029,31 +3053,9 @@ if __name__ == '__main__':
 
     print("Bot polling started. Press Ctrl+C to stop.")
     sys.stdout.flush()
+    _run_polling()
 
-    def _run_polling():
-        """تشغيل الـ polling مع retry تلقائى عند 409."""
-        while True:
-            try:
-                bot.infinity_polling(
-                    timeout=30,
-                    long_polling_timeout=20,
-                    allowed_updates=None,
-                )
-                break   # خرج بشكل طبيعى
-            except KeyboardInterrupt:
-                print("Bot stopped by user")
-                break
-            except Exception as e:
-                err = str(e)
-                if "409" in err:
-                    # instance آخر لا يزال يعمل — انتظر ثم أعد المحاولة
-                    logger.warning("409 Conflict — old instance still alive, retrying in 5s...")
-                    time.sleep(5)
-                else:
-                    logger.error(f"Polling error: {e}")
-                    time.sleep(3)
 
-    try:
-        _run_polling()
-    except Exception as e:
-        print(f"Bot error: {e}")
+# Polling Mode
+if __name__ == '__main__':
+    main()
