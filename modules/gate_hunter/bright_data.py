@@ -164,37 +164,59 @@ def _fetch_serp_page(engine_key, query, country, page):
     }
 
     url = _build_engine_url(engine_key, query, page)
-    logger.info(f"[BrightData] Searching {engine_key} in {country}, page {page}")
+    logger.info(f"[BrightData] Requesting URL: {url[:100]}...")
+    logger.info(f"[BrightData] Using proxy: {proxies['http'][:80]}...")
 
     try:
+        logger.info(f"[BrightData] Sending request to {engine_key}...")
         r = requests.get(url, headers=headers, proxies=proxies,
-                         verify=False, timeout=25)
+                         verify=False, timeout=15)
+        logger.info(f"[BrightData] Response received: HTTP {r.status_code}, length={len(r.text)}")
+
         if r.status_code != 200:
             logger.warning(f"[BrightData] HTTP {r.status_code} for {engine_key}/{country}")
+            logger.debug(f"[BrightData] Response body: {r.text[:500]}")
             return []
 
+        # محاولة parse JSON أولاً
         try:
             data = r.json()
+            logger.info(f"[BrightData] JSON parsed successfully, keys: {list(data.keys())[:5]}")
             urls = _extract_from_json(data, 50)
             if urls:
-                logger.info(f"[BrightData] Found {len(urls)} URLs from {engine_key}/{country}")
+                logger.info(f"[BrightData] ✓ Found {len(urls)} URLs from {engine_key}/{country}")
                 return urls
-        except (ValueError, json.JSONDecodeError):
-            logger.warning(f"[BrightData] JSON parse failed for {engine_key}/{country}, trying HTML")
-            pass
+            else:
+                logger.warning(f"[BrightData] JSON parsed but no URLs found")
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"[BrightData] JSON parse failed: {e}, trying HTML fallback")
 
+        # خطة بديلة: HTML
         url_html = url.replace('&brd_json=1', '')
+        logger.info(f"[BrightData] Trying HTML fallback: {url_html[:100]}...")
         r2 = requests.get(url_html, headers=headers, proxies=proxies,
-                          verify=False, timeout=25)
+                          verify=False, timeout=15)
+        logger.info(f"[BrightData] HTML response: HTTP {r2.status_code}, length={len(r2.text)}")
+
+        if r2.status_code != 200:
+            logger.warning(f"[BrightData] HTML fallback also failed: HTTP {r2.status_code}")
+            return []
+
         urls = _extract_from_html_fallback(r2.text, 50)
-        logger.info(f"[BrightData] Found {len(urls)} URLs from HTML fallback {engine_key}/{country}")
+        logger.info(f"[BrightData] HTML fallback found {len(urls)} URLs from {engine_key}/{country}")
         return urls
 
+    except requests.exceptions.Timeout:
+        logger.error(f"[BrightData] ⏱️ TIMEOUT for {engine_key}/{country} after 15s")
+        return []
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"[BrightData] 🔌 CONNECTION ERROR for {engine_key}/{country}: {str(e)[:200]}")
+        return []
     except Exception as e:
-        logger.error(f"[BrightData] Error: {e}")
+        logger.error(f"[BrightData] ❌ UNEXPECTED ERROR for {engine_key}/{country}: {type(e).__name__}: {e}", exc_info=True)
         return []
 
-def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
+def search_dork(query, target_count, progress_cb=None, max_multiplier=5, overall_timeout=180):
     """
     بحث شامل عبر Bright Data SERP API
 
@@ -203,12 +225,19 @@ def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
         target_count: العدد المطلوب من النتائج
         progress_cb: callback function(current, attempts, max)
         max_multiplier: مضاعف سقف المحاولات
+        overall_timeout: سقف الوقت للبحث الكامل (ثواني)
 
     Returns:
         (urls, reached_target, attempts_used)
     """
-    # Bright Data credentials hardcoded - جاهزة للاستخدام مباشرة
+    import time
+    start_time = time.time()
+
+    logger.info(f"[BrightData] ═══════════════════════════════════")
     logger.info(f"[BrightData] Starting search: query='{query}', target={target_count}")
+    logger.info(f"[BrightData] Credentials: Customer ID={BD_CUSTOMER_ID[:8]}..., Zone={BD_ZONE}")
+    logger.info(f"[BrightData] Overall timeout: {overall_timeout}s")
+
     engines = list(SEARCH_ENGINES.keys())
     countries = list(COUNTRIES.keys())
     seen_domains = set()
@@ -217,7 +246,11 @@ def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
     attempts = [0]
     max_requests = max(20, int(target_count * max_multiplier))
 
+    logger.info(f"[BrightData] Max attempts: {max_requests}, Engines: {engines}")
+    logger.info(f"[BrightData] Countries: {countries[:5]}... ({len(countries)} total)")
+
     def worker(engine_key, country, page):
+        logger.info(f"[BrightData] → Worker started: {engine_key}/{country}/page{page}")
         urls = _fetch_serp_page(engine_key, query, country, page)
         added = 0
         with lock:
@@ -229,36 +262,64 @@ def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
                     seen_domains.add(d)
                     results.append(u)
                     added += 1
+        logger.info(f"[BrightData] ← Worker finished: {engine_key}/{country}, added {added} URLs")
         return added
 
     page = 0
     with ThreadPoolExecutor(max_workers=10) as ex:
         while len(results) < target_count and attempts[0] < max_requests:
+            # فحص الوقت الكلي
+            elapsed = time.time() - start_time
+            if elapsed > overall_timeout:
+                logger.warning(f"[BrightData] ⏰ Overall timeout reached ({overall_timeout}s), stopping search")
+                break
+
             batch = []
             batch_size = min(10, max_requests - attempts[0])
 
-            logger.info(f"[BrightData] Batch {page+1}: {len(results)}/{target_count} results, {attempts[0]}/{max_requests} attempts")
+            logger.info(f"[BrightData] ━━━ Batch {page+1} ━━━")
+            logger.info(f"[BrightData] Progress: {len(results)}/{target_count} results, {attempts[0]}/{max_requests} attempts")
+            logger.info(f"[BrightData] Time elapsed: {elapsed:.1f}s / {overall_timeout}s")
+            logger.info(f"[BrightData] Submitting {batch_size} parallel requests...")
 
-            for _ in range(batch_size):
+            for i in range(batch_size):
                 engine_key = random.choice(engines)
                 country = random.choice(countries)
+                logger.debug(f"[BrightData] Task {i+1}/{batch_size}: {engine_key}/{country}")
                 batch.append(ex.submit(worker, engine_key, country, page))
                 attempts[0] += 1
 
+            logger.info(f"[BrightData] Waiting for {len(batch)} futures to complete...")
+            completed_count = 0
             for f in as_completed(batch):
                 try:
-                    f.result()
-                except Exception:
-                    pass
+                    result = f.result(timeout=30)  # 30s timeout per future
+                    completed_count += 1
+                except Exception as e:
+                    logger.error(f"[BrightData] Future failed: {type(e).__name__}: {e}")
+
+            logger.info(f"[BrightData] Batch {page+1} complete: {completed_count}/{len(batch)} succeeded")
 
             if progress_cb:
-                progress_cb(len(results), attempts[0], max_requests)
+                try:
+                    progress_cb(len(results), attempts[0], max_requests)
+                except Exception as e:
+                    logger.error(f"[BrightData] Progress callback failed: {e}")
 
             if len(results) >= target_count:
+                logger.info(f"[BrightData] ✓ Target reached: {len(results)} >= {target_count}")
                 break
 
             page += 1
+            logger.info(f"[BrightData] Moving to page {page+1}, results so far: {len(results)}")
 
     reached = len(results) >= target_count
-    logger.info(f"[BrightData] Search complete: {len(results)} results, {attempts[0]} attempts, reached={reached}")
+    total_time = time.time() - start_time
+    logger.info(f"[BrightData] ═══════════════════════════════════")
+    logger.info(f"[BrightData] Search complete: {len(results)} results, {attempts[0]} attempts")
+    logger.info(f"[BrightData] Target reached: {reached} ({len(results)}/{target_count})")
+    logger.info(f"[BrightData] Unique domains found: {len(seen_domains)}")
+    logger.info(f"[BrightData] Total time: {total_time:.1f}s")
+    logger.info(f"[BrightData] ═══════════════════════════════════")
+
     return results[:target_count], reached, attempts[0]
