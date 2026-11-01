@@ -19,3 +19,4 @@ Thumbs.db
 # Local data
 *.db
 *.sqlite3
+gate_hunter_config.json
