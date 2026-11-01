@@ -1612,6 +1612,10 @@ user_session_state = {}   # {user_id: state_str}
 admin_session      = {}   # {user_id: admin_state}
 user_bulk_results  = {}   # {user_id: [result_lines]} for export
 
+# Gate Hunter State
+gatehunter_user_state = {}   # {user_id: state_str}
+gatehunter_user_data  = {}   # {user_id: temp_data}
+
 # ═══════════════════════════════════════
 # إدارة الإيقاف المبكر (Stop/Cancel) باستخدام Generation ID
 # ═══════════════════════════════════════
@@ -1722,6 +1726,10 @@ def main_menu_kb(user_id=None):
     kb.add(
         btn("⚙️ Settings",     STYLE_PRIMARY, callback_data="menu_settings"),
         btn("🔍 Gate Scanner", STYLE_PRIMARY, callback_data="menu_gate_scan"),
+    )
+    # بوابة Gate Hunter
+    kb.add(
+        btn("🚪 Gate Hunter", STYLE_INFO, callback_data="gatehunter_main"),
     )
     if user_id and user_id == ADMIN_ID:
         kb.add(btn("🛠️ Admin Panel", STYLE_DANGER, callback_data="menu_admin"))
@@ -2131,6 +2139,171 @@ def admin_revoke_input(message):
         bot.send_message(user_id, "❌ فشل إلغاء الكود (غير موجود أو مستخدم).")
     admin_session[user_id] = 'authenticated'
     show_admin_menu(user_id)
+
+# ═══════════════════════════════════════════════════════════
+# GATE HUNTER MESSAGE HANDLERS
+# ═══════════════════════════════════════════════════════════
+@bot.message_handler(func=lambda m: gatehunter_user_state.get(m.from_user.id) in [
+    'awaiting_query', 'awaiting_custom_num', 'awaiting_scan_confirm',
+    'awaiting_bd_creds', 'awaiting_bd_zone', 'awaiting_def_num', 'awaiting_multiplier'
+])
+def handle_gatehunter_messages(message):
+    """Gate Hunter Bot Message Handlers"""
+    from modules.gate_hunter.handlers import (
+        main_kb, search_kb, confirm_scan_kb, settings_kb,
+        gatehunter_user_state, gatehunter_user_data, format_scan_result,
+        run_scan_for_user, MAIN_TEXT, _progress_bar
+    )
+    from modules.gate_hunter.config import load_config, save_config
+    from modules.gate_hunter.database import init_db, db_save_search
+    from modules.gate_hunter.bright_data import search_dork
+
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    text = message.text.strip() if message.text else ''
+    state = gatehunter_user_state.get(user_id)
+
+    try:
+        bot.delete_message(chat_id, message.message_id)
+    except Exception:
+        pass
+
+    # تهيئة قاعدة البيانات
+    init_db()
+
+    # ─── استعلام البحث ───
+    if state == 'awaiting_query':
+        if not text:
+            bot.send_message(user_id, "❌ أرسل نص البحث أو الدورك.")
+            return
+
+        if user_id not in gatehunter_user_data:
+            gatehunter_user_data[user_id] = {}
+
+        gatehunter_user_data[user_id]['query'] = text
+        cfg = load_config()
+        num = gatehunter_user_data[user_id].get('num', cfg.get('max_results', 20))
+
+        # رسالة تأكيد
+        msg = bot.send_message(
+            user_id,
+            f"🔍 *تأكيد البحث*\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 البحث: `{text}`\n"
+            f"🔢 العدد: *{num}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ هل تريد البدء؟",
+            parse_mode='Markdown',
+            reply_markup=confirm_scan_kb(num)
+        )
+
+        gatehunter_user_state[user_id] = 'awaiting_scan_confirm'
+        return
+
+    # ─── عدد مخصص ───
+    if state == 'awaiting_custom_num':
+        try:
+            n = int(text)
+            if n < 1 or n > 5000:
+                raise ValueError
+        except ValueError:
+            bot.send_message(user_id, "❌ أرسل رقماً صحيحاً بين 1 و 5000.")
+            return
+
+        if user_id not in gatehunter_user_data:
+            gatehunter_user_data[user_id] = {}
+        gatehunter_user_data[user_id]['num'] = n
+
+        gatehunter_user_state[user_id] = 'awaiting_query'
+
+        bot.send_message(
+            user_id,
+            f"✅ تم تعيين العدد إلى *{n}*.\n\n"
+            f"📝 أرسل نص البحث أو الدورك الآن:",
+            parse_mode='Markdown',
+            reply_markup=search_kb()
+        )
+        return
+
+    # ─── إعدادات Bright Data ───
+    if state == 'awaiting_bd_creds':
+        if ':' not in text:
+            bot.send_message(user_id, "❌ الصيغة غير صحيحة. استخدم: `customer_id:password`", parse_mode='Markdown')
+            return
+
+        parts = text.split(':', 1)
+        cfg = load_config()
+        cfg['bd_customer_id'] = parts[0].strip()
+        cfg['bd_password'] = parts[1].strip()
+        save_config(cfg)
+
+        gatehunter_user_state[user_id] = None
+        bot.send_message(
+            user_id,
+            "✅ *تم حفظ Credentials بنجاح!*\n\n"
+            "يمكنك الآن استخدام Gate Hunter.",
+            parse_mode='Markdown',
+            reply_markup=settings_kb()
+        )
+        return
+
+    if state == 'awaiting_bd_zone':
+        cfg = load_config()
+        cfg['bd_zone'] = text.strip()
+        save_config(cfg)
+
+        gatehunter_user_state[user_id] = None
+        bot.send_message(
+            user_id,
+            f"✅ *تم حفظ الـ Zone: `{text}`*",
+            parse_mode='Markdown',
+            reply_markup=settings_kb()
+        )
+        return
+
+    if state == 'awaiting_def_num':
+        try:
+            n = int(text)
+            if n < 1 or n > 1000:
+                raise ValueError
+        except ValueError:
+            bot.send_message(user_id, "❌ أرسل رقماً صحيحاً بين 1 و 1000.")
+            return
+
+        cfg = load_config()
+        cfg['max_results'] = n
+        save_config(cfg)
+
+        gatehunter_user_state[user_id] = None
+        bot.send_message(
+            user_id,
+            f"✅ *تم تعيين العدد الافتراضي إلى {n}*",
+            parse_mode='Markdown',
+            reply_markup=settings_kb()
+        )
+        return
+
+    if state == 'awaiting_multiplier':
+        try:
+            n = int(text)
+            if n < 1 or n > 20:
+                raise ValueError
+        except ValueError:
+            bot.send_message(user_id, "❌ أرسل رقماً صحيحاً بين 1 و 20.")
+            return
+
+        cfg = load_config()
+        cfg['max_request_multiplier'] = n
+        save_config(cfg)
+
+        gatehunter_user_state[user_id] = None
+        bot.send_message(
+            user_id,
+            f"✅ *تم تعيين سقف المحاولات إلى {n}*",
+            parse_mode='Markdown',
+            reply_markup=settings_kb()
+        )
+        return
 
 # ═══════════════════════════════════════
 # معالج الملفات
@@ -3176,6 +3349,355 @@ def show_admin_menu(user_id):
         reply_markup=kb, parse_mode="Markdown"
     )
 
+# ═══════════════════════════════════════════════════════════
+# GATE HUNTER BOT CALLBACKS
+# ═══════════════════════════════════════════════════════════
+@bot.callback_query_handler(func=lambda c: c.data.startswith('gatehunter_'))
+def cb_gatehunter(call):
+    """Gate Hunter Bot Callbacks"""
+    from modules.gate_hunter.handlers import (
+        main_kb, search_kb, num_kb, confirm_scan_kb, dorks_kb, settings_kb,
+        gatehunter_user_state, gatehunter_user_data, format_scan_result,
+        run_scan_for_user, MAIN_TEXT
+    )
+    from modules.gate_hunter.config import load_config, save_config
+    from modules.gate_hunter.database import init_db, db_stats
+    from modules.gate_hunter.bright_data import search_dork
+    from modules.gate_hunter.signatures import DORK_PRESETS
+
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    mid = call.message.message_id
+    data = call.data
+
+    bot.answer_callback_query(call.id)
+
+    # تهيئة قاعدة البيانات
+    init_db()
+
+    # ─── القائمة الرئيسية ───
+    if data == "gatehunter_main":
+        gatehunter_user_state.pop(user_id, None)
+        gatehunter_user_data.pop(user_id, None)
+        bot.edit_message_text(
+            MAIN_TEXT,
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=main_kb(),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── بحث جديد ───
+    if data == "gatehunter_search":
+        gatehunter_user_state[user_id] = 'awaiting_query'
+        if user_id not in gatehunter_user_data:
+            gatehunter_user_data[user_id] = {}
+
+        cfg = load_config()
+        gatehunter_user_data[user_id].setdefault('num', cfg.get('max_results', 20))
+
+        from modules.gate_hunter.signatures import SEARCH_ENGINES, COUNTRIES
+        n_engines = len(SEARCH_ENGINES)
+        n_countries = len(COUNTRIES)
+        num = gatehunter_user_data[user_id]['num']
+
+        bot.edit_message_text(
+            f"🔍 *بحث جديد*\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 المحركات: Google, Bing, Yahoo, DuckDuckGo, Yandex ({n_engines})\n"
+            f"🌍 الدول: عشوائي من {n_countries} دولة\n"
+            f"🔢 عدد النتائج: *{num}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 أرسل *نص البحث* أو *Google Dork* الآن:",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=search_kb(),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── تغيير عدد النتائج ───
+    if data == "gatehunter_change_num":
+        bot.edit_message_text(
+            "🔢 *اختر عدد النتائج المطلوب:*\n\n"
+            "_(كل ما زاد الرقم، زاد عدد الطلبات والوقت المستغرق)_",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=num_kb(),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── اختيار عدد محدد ───
+    if data.startswith("gatehunter_num_") and data != "gatehunter_num_custom":
+        try:
+            n = int(data.split('_')[2])
+        except Exception:
+            return
+
+        if user_id not in gatehunter_user_data:
+            gatehunter_user_data[user_id] = {}
+        gatehunter_user_data[user_id]['num'] = n
+
+        bot.answer_callback_query(call.id, f"✅ {n} نتيجة")
+        gatehunter_user_state[user_id] = 'awaiting_query'
+
+        bot.edit_message_text(
+            f"🔍 *بحث جديد*\n\n"
+            f"🔢 النتائج المطلوبة: *{n}*\n\n"
+            f"📝 أرسل نص البحث أو الدورك الآن:",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=search_kb(),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── عدد مخصص ───
+    if data == "gatehunter_num_custom":
+        gatehunter_user_state[user_id] = 'awaiting_custom_num'
+        bot.edit_message_text(
+            "✏️ *أرسل العدد المطلوب كرقم* (مثال: `300`):",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=types.InlineKeyboardMarkup().add(
+                btn("⬅️ رجوع", STYLE_DANGER, callback_data="gatehunter_main")
+            ),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── دوركات جاهزة ───
+    if data == "gatehunter_dorks":
+        bot.edit_message_text(
+            "📋 *اختر دورك جاهز:*\n\n"
+            "_(الدوركات هي استعلامات بحث متقدمة للعثور على مواقع محددة)_",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=dorks_kb(),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── اختيار دورك ───
+    if data.startswith("gatehunter_dork_"):
+        try:
+            idx = int(data.split('_')[2])
+            label, query = DORK_PRESETS[idx]
+        except Exception:
+            return
+
+        if user_id not in gatehunter_user_data:
+            gatehunter_user_data[user_id] = {}
+
+        gatehunter_user_data[user_id]['query'] = query
+        gatehunter_user_data[user_id]['label'] = label
+
+        cfg = load_config()
+        num = gatehunter_user_data[user_id].get('num', cfg.get('max_results', 20))
+
+        bot.edit_message_text(
+            f"🔍 *الدورك المحدد:*\n\n"
+            f"📋 {label}\n"
+            f"🔢 عدد النتائج: *{num}*\n\n"
+            f"✅ هل تريد البدء؟",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=confirm_scan_kb(num),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── الإحصائيات ───
+    if data == "gatehunter_stats":
+        searches, total, exposed = db_stats()
+        caption = (
+            f"📊 *إحصائيات Gate Hunter*\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 عمليات البحث: *{searches}*\n"
+            f"🌐 مواقع مفحوصة: *{total}*\n"
+            f"✅ مواقع مكشوفة: *{exposed}*\n"
+            f"🛡️ مواقع محمية: *{total - exposed}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        bot.edit_message_text(
+            caption,
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=types.InlineKeyboardMarkup().add(
+                btn("⬅️ رجوع", STYLE_DANGER, callback_data="gatehunter_main")
+            ),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── الإعدادات ───
+    if data == "gatehunter_settings":
+        bot.edit_message_text(
+            "⚙️ *إعدادات Gate Hunter*\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "خصص إعدادات البحث والفحص:",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=settings_kb(),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── تأكيد الفحص ───
+    if data == "gatehunter_scan_yes":
+        if user_id not in gatehunter_user_data or 'query' not in gatehunter_user_data[user_id]:
+            bot.send_message(user_id, "❌ حدث خطأ. ابدأ من جديد.")
+            return
+
+        query = gatehunter_user_data[user_id]['query']
+        num = gatehunter_user_data[user_id].get('num', 20)
+
+        # رسالة البدء
+        bot.edit_message_text(
+            f"🚀 *جاري البحث...*\n\n"
+            f"🔍 البحث عن: `{query}`\n"
+            f"🔢 العدد المطلوب: *{num}*\n\n"
+            f"⏳ انتظر قليلاً...",
+            chat_id=chat_id,
+            message_id=mid,
+            parse_mode='Markdown'
+        )
+
+        # تشغيل البحث في thread
+        def run_search_and_scan():
+            try:
+                # البحث
+                urls, reached, attempts = search_dork(query, num)
+
+                if not urls:
+                    bot.send_message(user_id, "❌ لم يتم العثور على نتائج.")
+                    return
+
+                # حفظ البحث
+                from modules.gate_hunter.database import db_save_search
+                sid = db_save_search(query, 'multi', len(urls))
+
+                # رسالة تأكيد
+                confirm_msg = bot.send_message(
+                    user_id,
+                    f"✅ *تم العثور على {len(urls)} موقع!*\n\n"
+                    f"هل تريد بدء الفحص العميق؟",
+                    parse_mode='Markdown',
+                    reply_markup=confirm_scan_kb(len(urls))
+                )
+
+                gatehunter_user_data[user_id]['urls'] = urls
+                gatehunter_user_state[user_id] = 'awaiting_scan_confirm'
+
+            except Exception as e:
+                logger.error(f"Search error: {e}")
+                bot.send_message(user_id, f"❌ خطأ في البحث: {e}")
+
+        threading.Thread(target=run_search_and_scan).start()
+        return
+
+    # ─── إلغاء الفحص ───
+    if data == "gatehunter_scan_no":
+        bot.edit_message_text(
+            "❌ تم الإلغاء.",
+            chat_id=chat_id,
+            message_id=mid,
+            parse_mode='Markdown'
+        )
+        gatehunter_user_state.pop(user_id, None)
+        gatehunter_user_data.pop(user_id, None)
+        return
+
+    # ─── Toggle الإعدادات ───
+    if data == "gatehunter_toggle_deep":
+        cfg = load_config()
+        cfg['deep_scan'] = not cfg.get('deep_scan', True)
+        save_config(cfg)
+
+        bot.answer_callback_query(call.id, f"✅ الفحص العميق: {'مفعل' if cfg['deep_scan'] else 'معطل'}")
+        bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=settings_kb()
+        )
+        return
+
+    if data == "gatehunter_toggle_protected":
+        cfg = load_config()
+        cfg['send_protected'] = not cfg.get('send_protected', True)
+        save_config(cfg)
+
+        bot.answer_callback_query(call.id, f"✅ إظهار المحميات: {'مفعل' if cfg['send_protected'] else 'معطل'}")
+        bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=settings_kb()
+        )
+        return
+
+    # ─── إعدادات Bright Data ───
+    if data == "gatehunter_set_bd_creds":
+        gatehunter_user_state[user_id] = 'awaiting_bd_creds'
+        bot.edit_message_text(
+            "🔑 *أرسل Bright Data Credentials:*\n\n"
+            "الصيغة: `customer_id:password`\n\n"
+            "مثال: `abc123xyz:mypass123`",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=types.InlineKeyboardMarkup().add(
+                btn("⬅️ رجوع", STYLE_DANGER, callback_data="gatehunter_settings")
+            ),
+            parse_mode='Markdown'
+        )
+        return
+
+    if data == "gatehunter_set_bd_zone":
+        gatehunter_user_state[user_id] = 'awaiting_bd_zone'
+        cfg = load_config()
+        bot.edit_message_text(
+            f"📝 *أرسل اسم الـ Zone:*\n\n"
+            f"الحالي: `{cfg.get('bd_zone', 'serp_api')}`",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=types.InlineKeyboardMarkup().add(
+                btn("⬅️ رجوع", STYLE_DANGER, callback_data="gatehunter_settings")
+            ),
+            parse_mode='Markdown'
+        )
+        return
+
+    if data == "gatehunter_set_def_num":
+        gatehunter_user_state[user_id] = 'awaiting_def_num'
+        bot.edit_message_text(
+            "🔢 *أرسل عدد النتائج الافتراضي* (مثال: `20`):",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=types.InlineKeyboardMarkup().add(
+                btn("⬅️ رجوع", STYLE_DANGER, callback_data="gatehunter_settings")
+            ),
+            parse_mode='Markdown'
+        )
+        return
+
+    if data == "gatehunter_set_multiplier":
+        gatehunter_user_state[user_id] = 'awaiting_multiplier'
+        cfg = load_config()
+        bot.edit_message_text(
+            f"🔁 *أرسل سقف محاولات البحث:*\n\n"
+            f"الحالي: `{cfg.get('max_request_multiplier', 5)}`\n\n"
+            f"_(العدد الفعلي = العدد المطلوب × هذا الرقم)_",
+            chat_id=chat_id,
+            message_id=mid,
+            reply_markup=types.InlineKeyboardMarkup().add(
+                btn("⬅️ رجوع", STYLE_DANGER, callback_data="gatehunter_settings")
+            ),
+            parse_mode='Markdown'
+        )
+        return
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith('admin_'))
 def cb_admin(call):
     user_id = call.from_user.id
@@ -3348,6 +3870,10 @@ def main():
     """Entry point for the bot (used by bot.py and main.py)."""
     print("Starting bot in Polling mode...")
     sys.stdout.flush()
+
+    # تهيئة قاعدة بيانات البوابة
+    from modules.gate_hunter.database import init_db as gatehunter_init_db
+    gatehunter_init_db()
 
     # ── حل مشكلة 409 Conflict ────────────────────────────────────────────────
     # pyTelegramBotAPI 4.x لا يدعم drop_pending_updates في remove_webhook
