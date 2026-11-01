@@ -2398,6 +2398,14 @@ def handle_doc(message):
 def handle_text(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
+
+    # إذا كان المستخدم في حالة محادثة مع بوابة صائد البوابات (بحث جديد، إعدادات، إلخ)،
+    # اترك معالج صائد البوابات المتخصص يتعامل مع الرسالة ولا تتدخل هنا
+    # لتجنب إعادة المستخدم للقائمة الرئيسية (home) عن طريق الخطأ
+    from modules.gate_hunter.handlers import gatehunter_user_state
+    if gatehunter_user_state.get(user_id) is not None:
+        return
+
     state   = user_session_state.get(user_id)
     text    = message.text.strip() if message.text else ''
 
