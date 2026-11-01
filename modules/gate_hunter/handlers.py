@@ -121,6 +121,39 @@ def settings_kb():
     kb.add(btn('⬅️ لوحة الأدمن', 'menu_admin'))
     return kb
 
+def get_settings_summary():
+    """عرض ملخص الإعدادات الحالية"""
+    cfg = load_config()
+
+    # إخفاء كلمة المرور (عرض أول 4 أحرف فقط)
+    password = cfg.get('bd_password', '')
+    masked_pw = '*' * len(password) if password else 'غير محدد'
+
+    customer_id = cfg.get('bd_customer_id', '') or 'غير محدد'
+    zone = cfg.get('bd_zone', 'serp_api')
+    max_results = cfg.get('max_results', 20)
+    multiplier = cfg.get('max_request_multiplier', 5)
+    deep_scan = '✅ مفعل' if cfg.get('deep_scan', True) else '❌ معطل'
+    show_protected = '✅ مفعل' if cfg.get('send_protected', True) else '❌ معطل'
+
+    summary = (
+        f"⚙️ *الإعدادات الحالية:*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔑 *Bright Data:*\n"
+        f"  • Customer ID: `{customer_id[:10]}...`\n"
+        f"  • Zone: `{zone}`\n"
+        f"  • Password: `{masked_pw}`\n\n"
+        f"🔢 *البحث:*\n"
+        f"  • عدد النتائج الافتراضي: *{max_results}*\n"
+        f"  • سقف المحاولات: *{multiplier}*\n\n"
+        f"🔬 *الفحص:*\n"
+        f"  • الفحص العميق: {deep_scan}\n"
+        f"  • إظهار المحميات: {show_protected}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    return summary
+
 # ═══════════════════════════════════════════════════════════
 #  HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════

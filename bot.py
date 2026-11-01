@@ -2155,7 +2155,7 @@ def handle_gatehunter_messages(message):
         return
 
     from modules.gate_hunter.handlers import (
-        main_kb, search_kb, confirm_scan_kb, settings_kb,
+        main_kb, search_kb, confirm_scan_kb, settings_kb, get_settings_summary,
         gatehunter_user_state, gatehunter_user_data, format_scan_result,
         run_scan_for_user, MAIN_TEXT, _progress_bar
     )
@@ -2231,6 +2231,8 @@ def handle_gatehunter_messages(message):
 
     # ─── إعدادات Bright Data ───
     if state == 'awaiting_bd_creds':
+        from modules.gate_hunter.handlers import get_settings_summary
+
         if ':' not in text:
             bot.send_message(user_id, "❌ الصيغة غير صحيحة. استخدم: `customer_id:password`", parse_mode='Markdown')
             return
@@ -2244,14 +2246,18 @@ def handle_gatehunter_messages(message):
         gatehunter_user_state[user_id] = None
         bot.send_message(
             user_id,
-            "✅ *تم حفظ Credentials بنجاح!*\n\n"
-            "يمكنك الآن استخدام Gate Hunter.",
+            f"✅ *تم حفظ Credentials بنجاح!*\n\n"
+            f"• Customer ID: `{parts[0].strip()[:10]}...`\n"
+            f"• Password: `{'*' * len(parts[1].strip())}`\n\n"
+            f"{get_settings_summary()}",
             parse_mode='Markdown',
             reply_markup=settings_kb()
         )
         return
 
     if state == 'awaiting_bd_zone':
+        from modules.gate_hunter.handlers import get_settings_summary
+
         cfg = load_config()
         cfg['bd_zone'] = text.strip()
         save_config(cfg)
@@ -2259,7 +2265,9 @@ def handle_gatehunter_messages(message):
         gatehunter_user_state[user_id] = None
         bot.send_message(
             user_id,
-            f"✅ *تم حفظ الـ Zone: `{text}`*",
+            f"✅ *تم حفظ الـ Zone بنجاح!*\n\n"
+            f"• Zone: `{text}`\n\n"
+            f"{get_settings_summary()}",
             parse_mode='Markdown',
             reply_markup=settings_kb()
         )
@@ -2281,13 +2289,16 @@ def handle_gatehunter_messages(message):
         gatehunter_user_state[user_id] = None
         bot.send_message(
             user_id,
-            f"✅ *تم تعيين العدد الافتراضي إلى {n}*",
+            f"✅ *تم تعيين العدد الافتراضي إلى {n}*\n\n"
+            f"{get_settings_summary()}",
             parse_mode='Markdown',
             reply_markup=settings_kb()
         )
         return
 
     if state == 'awaiting_multiplier':
+        from modules.gate_hunter.handlers import get_settings_summary
+
         try:
             n = int(text)
             if n < 1 or n > 20:
@@ -2303,7 +2314,8 @@ def handle_gatehunter_messages(message):
         gatehunter_user_state[user_id] = None
         bot.send_message(
             user_id,
-            f"✅ *تم تعيين سقف المحاولات إلى {n}*",
+            f"✅ *تم تعيين سقف المحاولات إلى {n}*\n\n"
+            f"{get_settings_summary()}",
             parse_mode='Markdown',
             reply_markup=settings_kb()
         )
@@ -3550,10 +3562,10 @@ def cb_gatehunter(call):
 
     # ─── الإعدادات ───
     if data == "gatehunter_settings":
+        from modules.gate_hunter.handlers import get_settings_summary
+
         bot.edit_message_text(
-            "⚙️ *إعدادات Gate Hunter*\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "خصص إعدادات البحث والفحص:",
+            get_settings_summary(),
             chat_id=chat_id,
             message_id=mid,
             reply_markup=settings_kb(),
@@ -3628,28 +3640,36 @@ def cb_gatehunter(call):
 
     # ─── Toggle الإعدادات ───
     if data == "gatehunter_toggle_deep":
+        from modules.gate_hunter.handlers import get_settings_summary
+
         cfg = load_config()
         cfg['deep_scan'] = not cfg.get('deep_scan', True)
         save_config(cfg)
 
         bot.answer_callback_query(call.id, f"✅ الفحص العميق: {'مفعل' if cfg['deep_scan'] else 'معطل'}")
-        bot.edit_message_reply_markup(
+        bot.edit_message_text(
+            get_settings_summary() + f"\n\n✅ *تم التحديث:* الفحص العميق الآن {'مفعل' if cfg['deep_scan'] else 'معطل'}",
             chat_id=chat_id,
             message_id=mid,
-            reply_markup=settings_kb()
+            reply_markup=settings_kb(),
+            parse_mode='Markdown'
         )
         return
 
     if data == "gatehunter_toggle_protected":
+        from modules.gate_hunter.handlers import get_settings_summary
+
         cfg = load_config()
         cfg['send_protected'] = not cfg.get('send_protected', True)
         save_config(cfg)
 
         bot.answer_callback_query(call.id, f"✅ إظهار المحميات: {'مفعل' if cfg['send_protected'] else 'معطل'}")
-        bot.edit_message_reply_markup(
+        bot.edit_message_text(
+            get_settings_summary() + f"\n\n✅ *تم التحديث:* إظهار المحميات الآن {'مفعل' if cfg['send_protected'] else 'معطل'}",
             chat_id=chat_id,
             message_id=mid,
-            reply_markup=settings_kb()
+            reply_markup=settings_kb(),
+            parse_mode='Markdown'
         )
         return
 
