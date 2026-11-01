@@ -62,7 +62,7 @@ def main_kb():
         btn('📊 الإحصائيات',        'gatehunter_stats'),
         btn('⚙️ الإعدادات',         'gatehunter_settings'),
     )
-    kb.add(btn('⬅️ القائمة الرئيسية', 'main_menu'))
+    kb.add(btn('⬅️ لوحة الأدمن', 'menu_admin'))
     return kb
 
 def search_kb():
@@ -118,7 +118,7 @@ def settings_kb():
         btn(f'🔬 الفحص العميق: {deep_label}',        'gatehunter_toggle_deep'),
         btn(f'🛡️ إظهار المحميات: {prot_label}',      'gatehunter_toggle_protected'),
     )
-    kb.add(btn('⬅️ القائمة الرئيسية', 'gatehunter_main'))
+    kb.add(btn('⬅️ لوحة الأدمن', 'menu_admin'))
     return kb
 
 # ═══════════════════════════════════════════════════════════

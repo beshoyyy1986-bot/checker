@@ -1728,10 +1728,6 @@ def main_menu_kb(user_id=None):
         btn("⚙️ Settings",     STYLE_PRIMARY, callback_data="menu_settings"),
         btn("🔍 Gate Scanner", STYLE_PRIMARY, callback_data="menu_gate_scan"),
     )
-    # بوابة Gate Hunter
-    kb.add(
-        btn("🚪 Gate Hunter", STYLE_INFO, callback_data="gatehunter_main"),
-    )
     if user_id and user_id == ADMIN_ID:
         kb.add(btn("🛠️ Admin Panel", STYLE_DANGER, callback_data="menu_admin"))
     kb.add(
@@ -2149,7 +2145,15 @@ def admin_revoke_input(message):
     'awaiting_bd_creds', 'awaiting_bd_zone', 'awaiting_def_num', 'awaiting_multiplier'
 ])
 def handle_gatehunter_messages(message):
-    """Gate Hunter Bot Message Handlers"""
+    """Gate Hunter Bot Message Handlers - Admin Only"""
+    user_id = message.from_user.id
+
+    # فحص أمني: فقط الأدمن يمكنه الوصول
+    if user_id != ADMIN_ID:
+        bot.send_message(user_id, "⛔ غير مصرح لك - للأدمن فقط")
+        gatehunter_user_state.pop(user_id, None)
+        return
+
     from modules.gate_hunter.handlers import (
         main_kb, search_kb, confirm_scan_kb, settings_kb,
         gatehunter_user_state, gatehunter_user_data, format_scan_result,
@@ -2159,7 +2163,6 @@ def handle_gatehunter_messages(message):
     from modules.gate_hunter.database import init_db, db_save_search
     from modules.gate_hunter.bright_data import search_dork
 
-    user_id = message.from_user.id
     chat_id = message.chat.id
     text = message.text.strip() if message.text else ''
     state = gatehunter_user_state.get(user_id)
@@ -3342,6 +3345,12 @@ def show_admin_menu(user_id):
     )
     kb.add(
         btn("🔍 تشخيص البوابات",  STYLE_PRIMARY, callback_data="admin_test_gates"),
+    )
+    # بوابة Gate Hunter - داخل لوحة الأدمن فقط
+    kb.add(
+        btn("🚪 صائد البوابات",   STYLE_INFO, callback_data="gatehunter_main"),
+    )
+    kb.add(
         btn("❌ خروج",            STYLE_DANGER,  callback_data="admin_logout"),
     )
     bot.send_message(
@@ -3355,7 +3364,14 @@ def show_admin_menu(user_id):
 # ═══════════════════════════════════════════════════════════
 @bot.callback_query_handler(func=lambda c: c.data.startswith('gatehunter_'))
 def cb_gatehunter(call):
-    """Gate Hunter Bot Callbacks"""
+    """Gate Hunter Bot Callbacks - Admin Only"""
+    user_id = call.from_user.id
+
+    # فحص أمني: فقط الأدمن يمكنه الوصول
+    if user_id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "⛔ غير مصرح لك - للأدمن فقط")
+        return
+
     from modules.gate_hunter.handlers import (
         main_kb, search_kb, num_kb, confirm_scan_kb, dorks_kb, settings_kb,
         gatehunter_user_state, gatehunter_user_data, format_scan_result,
@@ -3366,7 +3382,6 @@ def cb_gatehunter(call):
     from modules.gate_hunter.bright_data import search_dork
     from modules.gate_hunter.signatures import DORK_PRESETS
 
-    user_id = call.from_user.id
     chat_id = call.message.chat.id
     mid = call.message.message_id
     data = call.data
