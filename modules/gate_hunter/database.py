@@ -5,8 +5,8 @@ import os
 import sqlite3
 import time
 
-# مسار قاعدة البيانات
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data')
+# مسار قاعدة البيانات - يستخدم DATA_DIR من البيئة
+DATA_DIR = os.environ.get('DATA_DIR', os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 DB_FILE = os.path.join(DATA_DIR, 'gate_hunter.db')
 
 def init_db():

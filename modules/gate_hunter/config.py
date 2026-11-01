@@ -4,9 +4,9 @@ Gate Hunter Configuration Manager
 import os
 import json
 
-# مسار ملف الإعدادات
-CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config')
-CONFIG_FILE = os.path.join(CONFIG_DIR, 'gate_hunter_config.json')
+# مسار ملف الإعدادات - يستخدم DATA_DIR من البيئة
+DATA_DIR = os.environ.get('DATA_DIR', os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+CONFIG_FILE = os.path.join(DATA_DIR, 'gate_hunter_config.json')
 
 # الإعدادات الافتراضية
 _DEFAULT_CONFIG = {
@@ -22,17 +22,25 @@ _DEFAULT_CONFIG = {
 
 def load_config():
     """تحميل الإعدادات"""
-    os.makedirs(CONFIG_DIR, exist_ok=True)
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return {**_DEFAULT_CONFIG, **json.load(f)}
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                return {**_DEFAULT_CONFIG, **json.load(f)}
+        except Exception:
+            pass
     return dict(_DEFAULT_CONFIG)
 
 def save_config(config):
     """حفظ الإعدادات"""
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    try:
+        # تأكد من وجود المجلد
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"Error saving config: {e}")
+        return False
 
 def get_config():
     """الحصول على الإعدادات الحالية"""
