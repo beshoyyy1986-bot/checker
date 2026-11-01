@@ -1612,9 +1612,8 @@ user_session_state = {}   # {user_id: state_str}
 admin_session      = {}   # {user_id: admin_state}
 user_bulk_results  = {}   # {user_id: [result_lines]} for export
 
-# Gate Hunter State
-gatehunter_user_state = {}   # {user_id: state_str}
-gatehunter_user_data  = {}   # {user_id: temp_data}
+# Gate Hunter State — يتم استيرادها من handlers لمشاركة نفس القاموس مع الكولباك ومعالج الرسائل
+from modules.gate_hunter.handlers import gatehunter_user_state, gatehunter_user_data
 
 # ═══════════════════════════════════════
 # إدارة الإيقاف المبكر (Stop/Cancel) باستخدام Generation ID
