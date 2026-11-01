@@ -4,6 +4,7 @@ Bright Data SERP API Integration
 import json
 import random
 import threading
+import logging
 import requests
 from urllib.parse import urlparse, quote_plus, parse_qs, unquote
 from bs4 import BeautifulSoup
@@ -11,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import load_config
 from .signatures import COUNTRIES, EXCLUDED_DOMAINS
+
+logger = logging.getLogger(__name__)
 
 # محركات البحث المدعومة
 SEARCH_ENGINES = {
@@ -150,6 +153,7 @@ def _fetch_serp_page(engine_key, query, country, page):
     """يجلب صفحة نتائج واحدة من محرك ودولة محددين"""
     proxies = _build_proxy(country)
     if not proxies:
+        logger.warning(f"[BrightData] No proxy for country {country}")
         return []
 
     headers = {
@@ -160,27 +164,34 @@ def _fetch_serp_page(engine_key, query, country, page):
     }
 
     url = _build_engine_url(engine_key, query, page)
+    logger.info(f"[BrightData] Searching {engine_key} in {country}, page {page}")
 
     try:
         r = requests.get(url, headers=headers, proxies=proxies,
                          verify=False, timeout=25)
         if r.status_code != 200:
+            logger.warning(f"[BrightData] HTTP {r.status_code} for {engine_key}/{country}")
             return []
 
         try:
             data = r.json()
             urls = _extract_from_json(data, 50)
             if urls:
+                logger.info(f"[BrightData] Found {len(urls)} URLs from {engine_key}/{country}")
                 return urls
         except (ValueError, json.JSONDecodeError):
+            logger.warning(f"[BrightData] JSON parse failed for {engine_key}/{country}, trying HTML")
             pass
 
         url_html = url.replace('&brd_json=1', '')
         r2 = requests.get(url_html, headers=headers, proxies=proxies,
                           verify=False, timeout=25)
-        return _extract_from_html_fallback(r2.text, 50)
+        urls = _extract_from_html_fallback(r2.text, 50)
+        logger.info(f"[BrightData] Found {len(urls)} URLs from HTML fallback {engine_key}/{country}")
+        return urls
 
-    except Exception:
+    except Exception as e:
+        logger.error(f"[BrightData] Error: {e}")
         return []
 
 def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
@@ -197,6 +208,7 @@ def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
         (urls, reached_target, attempts_used)
     """
     # Bright Data credentials hardcoded - جاهزة للاستخدام مباشرة
+    logger.info(f"[BrightData] Starting search: query='{query}', target={target_count}")
     engines = list(SEARCH_ENGINES.keys())
     countries = list(COUNTRIES.keys())
     seen_domains = set()
@@ -225,6 +237,8 @@ def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
             batch = []
             batch_size = min(10, max_requests - attempts[0])
 
+            logger.info(f"[BrightData] Batch {page+1}: {len(results)}/{target_count} results, {attempts[0]}/{max_requests} attempts")
+
             for _ in range(batch_size):
                 engine_key = random.choice(engines)
                 country = random.choice(countries)
@@ -246,4 +260,5 @@ def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
             page += 1
 
     reached = len(results) >= target_count
+    logger.info(f"[BrightData] Search complete: {len(results)} results, {attempts[0]} attempts, reached={reached}")
     return results[:target_count], reached, attempts[0]
