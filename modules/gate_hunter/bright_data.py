@@ -36,15 +36,21 @@ SEARCH_ENGINES = {
     },
 }
 
+# ═══════════════════════════════════════════════════════════
+#  BRIGHT DATA CREDENTIALS (HARDCODED)
+# ═══════════════════════════════════════════════════════════
+BD_CUSTOMER_ID = '18055bd6-c696-4180-ac2d-e4e3d249dd11'
+BD_ZONE = 'serp_api'
+BD_PASSWORD = 'bbpx79u9d8sj'
+BD_ACCOUNT_ID = 'hl_d9e540dc'
+BD_USERNAME = 'dadysofy1@gmail.com'
+
 def _build_proxy(country):
     """بناء proxy لـ Bright Data"""
-    cfg = load_config()
-    cid = cfg.get('bd_customer_id', '').strip()
-    z = cfg.get('bd_zone', 'serp_api').strip()
-    pw = cfg.get('bd_password', '').strip()
-
-    if not cid or not pw:
-        return None
+    # استخدام بيانات hardcoded مباشرة
+    cid = BD_CUSTOMER_ID
+    z = BD_ZONE
+    pw = BD_PASSWORD
 
     cc = (country or 'us').lower()
     user = f'brd-customer-{cid}-zone-{z}-country-{cc}'
@@ -190,9 +196,7 @@ def search_dork(query, target_count, progress_cb=None, max_multiplier=5):
     Returns:
         (urls, reached_target, attempts_used)
     """
-    if not _build_proxy('us'):
-        raise ValueError("Bright Data غير مُهيأ — أضف credentials من ⚙️ الإعدادات")
-
+    # Bright Data credentials hardcoded - جاهزة للاستخدام مباشرة
     engines = list(SEARCH_ENGINES.keys())
     countries = list(COUNTRIES.keys())
     seen_domains = set()
