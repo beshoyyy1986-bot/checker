@@ -1684,6 +1684,7 @@ CARD_FORMAT_HELP = (
 STYLE_PRIMARY = "primary"   # 🔵 أزرق — الإجراءات الرئيسية
 STYLE_SUCCESS = "success"   # 🟢 أخضر — الإجراءات الإيجابية
 STYLE_DANGER  = "danger"    # 🔴 أحمر — الإجراءات الحساسة/الرجوع
+STYLE_INFO    = "primary"   # 🔵 أزرق - معلومات (alias for primary)
 
 # تحقق دقيق من دعم style: هل المكتبة تقبل الوسيط *وتُدرجه في to_dict*؟
 STYLE_SUPPORTED = False
@@ -2143,7 +2144,7 @@ def admin_revoke_input(message):
 # ═══════════════════════════════════════════════════════════
 # GATE HUNTER MESSAGE HANDLERS
 # ═══════════════════════════════════════════════════════════
-@bot.message_handler(func=lambda m: gatehunter_user_state.get(m.from_user.id) in [
+@bot.message_handler(func=lambda m: gatehunter_user_state.get(m.from_user.id) is not None and gatehunter_user_state.get(m.from_user.id) in [
     'awaiting_query', 'awaiting_custom_num', 'awaiting_scan_confirm',
     'awaiting_bd_creds', 'awaiting_bd_zone', 'awaiting_def_num', 'awaiting_multiplier'
 ])
