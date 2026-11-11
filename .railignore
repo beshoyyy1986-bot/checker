@@ -1,0 +1,9 @@
+.git
+nul
+*.db
+*.db-wal
+*.db-shm
+working_proxies.txt
+.env
+__pycache__
+*.pyc
