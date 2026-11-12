@@ -1569,17 +1569,35 @@ def cmd_test(message):
                      args=(message.chat.id, m.message_id)).start()
 
 def _run_gate_test(chat_id, msg_id):
+    """
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    إصلاح: جسم الدالة كان مقطوع فى النص وملوّت بكود خاص بطلب باسورد
+    الأدمن (نسخ ولصق غلط من مكان تانى) — ده كان سبب NameError مباشرة
+    لأن user_id مش معرّف هنا (البراميترز الحقيقية هى chat_id, msg_id)،
+    وكمان كان بيكسر حالة admin_session بالغلط حتى لو مشي.
+    الدالة دلوقتي بترجع نتيجة التشخيص فعلياً بدل ما تعلّق فى الفراغ.
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    """
     lines = ["🔍 *Gateway Diagnostics*", "━━━━━━━━━━━━━━━━━━━━━━"]
     for gid, info in GATES.items():
-        gtype = info.get('type','')
+        gtype = info.get('type', '')
         if gtype == 'cw':
             lines.append(f"{info['name']}: ✅ CharityWater API ready")
         elif gtype == 'kashier':
             lines.append(f"{info['name']}: ✅ Kashier FEP API ready")
         else:
             lines.append(f"{info['name']}: ⚠️ Unknown type")
-    bot.send_message(user_id, "🔐 *لوحة الإدارة*\nأرسل كلمة المرور:", parse_mode="Markdown")
-    admin_session[user_id] = 'awaiting_password'
+
+    a, b, d = proxy_pool.get_stats()
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📡 Proxies: 🟢{a} 🟡{b} 🔴{d}")
+
+    try:
+        bot.edit_message_text(
+            "\n".join(lines), chat_id, msg_id, parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"_run_gate_test send error: {e}")
 
 # ═══════════════════════════════════════
 # معالجات حالة الأدمن (يجب قبل handle_text)
