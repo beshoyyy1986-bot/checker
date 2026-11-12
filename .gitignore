@@ -1,0 +1,16 @@
+# أسرار.Environment — لا ترفع التوكن على GitHub
+.env
+
+# بايثون
+__pycache__/
+*.pyc
+*.pyo
+
+# قواعد البيانات والملفات الدائمة
+*.db
+*.db-wal
+*.db-shm
+working_proxies.txt
+
+# Railway
+.railway/
