@@ -5,3 +5,9 @@ gunicorn
 python-dotenv>=1.0.1
 PySocks>=1.7.1
 Pillow>=10.0.0
+
+# Playwright: مستخدم في gate_kashier.py لاختيار سكرين شوت *حقيقي*
+# لصفحة الـ 3DS/OTP (شوف _capture_real_screenshot).
+# ملاحظة: مكتبة بايثون مش بتجيب متصفح Chromium نفسه — لازم
+# playwright install chromium happens في مرحلة بناء الـ Docker image.
+playwright>=1.44.0

