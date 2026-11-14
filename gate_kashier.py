@@ -237,25 +237,94 @@ def _parse_proxy_for_playwright(proxy_str: str) -> Optional[dict]:
     return None
 
 
+def _autocrop_whitespace(img_bytes: bytes, max_output_width: int = 640,
+                         bg_threshold: int = 245) -> bytes:
+    """
+    Auto-crop المساحة البيضاء الفاضية من كل الاتجاهات باستخدام PIL.
+
+    بيستخدم getbbox() على نسخة grayscale للصورة بعد invert — أي pixel
+    أفتح من bg_threshold (أبيض أو قريب منه) بيتحسب خلفية وبيتشال.
+    الـ padding=10px بيضمن إن المحتوى ميبقاش ملصوق بحواف الصورة.
+
+    ده الـ fallback لما _capture_real_screenshot ماتقدرش تصوّر العنصر
+    مباشرة (iframe مش قابل للاستهداف، أو selector مش موجود).
+    """
+    from PIL import Image, ImageOps
+    im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+    # حوّل لـ grayscale وعمل invert — الأبيض يبقى أسود فـ getbbox يقدر يشوفه
+    gray = ImageOps.grayscale(im)
+    # أي pixel > threshold = خلفية بيضاء → نعمله 0 (أسود) بعد الـ invert
+    # PIL getbbox بيرجع حدود أول وآخر pixel مش أبيض
+    inverted = gray.point(lambda p: 255 if p < bg_threshold else 0)
+    bbox = inverted.getbbox()   # (left, top, right, bottom) أو None لو كلها بيضاء
+
+    if bbox:
+        pad = 10
+        left  = max(0,        bbox[0] - pad)
+        top   = max(0,        bbox[1] - pad)
+        right = min(im.width, bbox[2] + pad)
+        bot   = min(im.height,bbox[3] + pad)
+        im = im.crop((left, top, right, bot))
+        logger.info(f"[Kashier] autocrop: {im.width}x{im.height} (bbox={bbox})")
+    else:
+        logger.info("[Kashier] autocrop: no content found, returning original")
+
+    # تصغير العرض لو لزم
+    if im.width > max_output_width:
+        ratio = max_output_width / im.width
+        im = im.resize((max_output_width, int(im.height * ratio)), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
+
+
+# CSS selector للعنصر الرئيسي لصفحة الـ OTP/3DS
+# الأولوية: container صفحة OTP ← form ← body
+_OTP_CONTAINER_SELECTORS = [
+    # containers شائعة فى صفحات 3DS
+    ".challenge-container",
+    ".otp-container",
+    "#challengeForm",
+    "#otpForm",
+    "form",           # أي form فى الصفحة
+    "body",           # fallback أخير
+]
+
+_OTP_INPUT_SELECTORS = (
+    "input[type='number'], input[type='tel'], input[type='text'], "
+    "input[type='password'], input[name*='otp' i], input[name*='code' i], "
+    "input[placeholder*='OTP' i], input[placeholder*='code' i], form"
+)
+
+
 def _capture_real_screenshot(url: str, proxy_str: Optional[str],
-                              width: int = 390, height: int = 420) -> Optional[bytes]:
+                              width: int = 480, height: int = 700,
+                              max_output_width: int = 640) -> Optional[bytes]:
     """
     سكرين شوت *حقيقي* لصفحة الـ 3DS/OTP الفعلية باستخدام Playwright.
 
-    ده استبدال للدالة القديمة اللي كانت بترسم صورة ثابتة بـ PIL من غير ما
-    تفتح الصفحة أصلاً — هنا بنفتح الرابط فعلياً فى متصفح Chromium headless
-    ونصوّر اللى ظاهر بالفعل (نموذج OTP حقيقي، لوجو البنك، إلخ).
+    الاستراتيجية (من الأفضل للأسوأ):
+    1. element.screenshot() — يصوّر العنصر نفسه بالظبط بدون أي مساحة فاضية.
+       بنجرّب _OTP_CONTAINER_SELECTORS بالترتيب حتى نلاقي عنصر مرئي.
+    2. full_page screenshot + auto-crop بـ PIL — لو مافيش عنصر يستهدف
+       (iframe مثلاً)، بناخد الصفحة كلها ونشيل المساحة البيضاء تلقائياً.
 
-    Returns PNG/JPEG bytes أو None لو فشل (عندها check_kashier_gate بيرجع
-    لصورة توضيحية احتياطية مكتوب عليها صراحة إنها مش سكرين شوت حقيقي —
-    عشان محدش يتوهم تاني إنها صورة فعلية للصفحة).
+    التحسينات على النسخة القديمة:
+    - viewport أصغر (480px عرض بدل 1280px) — أقرب لشاشة موبايل، محتوى OTP
+      مركّز ومش غارق فى مساحة ديسكتوب فاضية
+    - element.screenshot() كأولوية — الصورة بحجم العنصر نفسه بالظبط
+    - auto-crop PIL كـ fallback — بدل crop يدوي بـ 900px ثابت
+
+    Returns JPEG bytes أو None لو فشل.
     """
     if not url:
         return None
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        logger.warning("[Kashier] playwright غير مثبّت — استخدم: pip install playwright && playwright install chromium")
+        logger.warning("[Kashier] playwright غير مثبّت — pip install playwright && playwright install chromium")
         return None
 
     pw_proxy = _parse_proxy_for_playwright(proxy_str) if proxy_str else None
@@ -266,19 +335,92 @@ def _capture_real_screenshot(url: str, proxy_str: Optional[str],
             browser = pw.chromium.launch(
                 headless=True,
                 proxy=pw_proxy,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
             )
             ctx = browser.new_context(
                 viewport={"width": width, "height": height},
                 user_agent=ua,
                 locale="en-US",
+                bypass_csp=True,
             )
             page = ctx.new_page()
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(2500)   # وقت يكفي لظهور نموذج الـ OTP/3DS بالكامل
-                img_bytes = page.screenshot(type="jpeg", quality=85)
+                page.goto(url, wait_until="load", timeout=30000)
+                logger.info(f"[Kashier] page loaded: {url[:80]}")
+
+                # انتظر ظهور input/form
+                try:
+                    page.wait_for_selector(_OTP_INPUT_SELECTORS, timeout=8000, state="visible")
+                    logger.info("[Kashier] OTP/form element found")
+                except Exception:
+                    logger.info("[Kashier] no OTP selector — taking screenshot anyway")
+
+                # انتظار late JS rendering
+                page.wait_for_timeout(2000)
+
+                # ── Strategy 1: element.screenshot() ─────────────────────────
+                img_bytes = None
+                for sel in _OTP_CONTAINER_SELECTORS:
+                    try:
+                        el = page.query_selector(sel)
+                        if el and el.is_visible():
+                            img_bytes = el.screenshot(type="jpeg", quality=88)
+                            logger.info(f"[Kashier] element screenshot OK (selector={sel!r}) — {len(img_bytes)} bytes")
+                            break
+                    except Exception as ex:
+                        logger.debug(f"[Kashier] element screenshot failed for {sel!r}: {ex}")
+
+                # ── Strategy 2: full_page + auto-crop ────────────────────────
+                if not img_bytes:
+                    logger.info("[Kashier] falling back to full_page + autocrop")
+                    raw = page.screenshot(type="png", full_page=True)
+                    try:
+                        img_bytes = _autocrop_whitespace(raw, max_output_width=max_output_width)
+                        logger.info(f"[Kashier] autocrop screenshot — {len(img_bytes)} bytes")
+                    except Exception as e:
+                        logger.warning(f"[Kashier] autocrop failed: {e} — using raw")
+                        # تصغير بسيط بدون crop كحل أخير
+                        try:
+                            from PIL import Image
+                            im = Image.open(io.BytesIO(raw))
+                            if im.width > max_output_width:
+                                ratio = max_output_width / im.width
+                                im = im.resize((max_output_width, int(im.height * ratio)), Image.LANCZOS)
+                            buf = io.BytesIO()
+                            im.save(buf, format="JPEG", quality=85)
+                            img_bytes = buf.getvalue()
+                        except Exception:
+                            img_bytes = raw   # worst case: PNG الأصلي
+
+                # ── Mandatory final resize ────────────────────────────────────
+                # بغض النظر عن الـ strategy اللي شتغلت، بنضمن هنا إن العرض
+                # ما يعديش max_output_width — بعض الصفحات (زي USAA SafeKey)
+                # بترندر نفسها بعرض ديسكتوب كامل حتى لو الـ viewport أصغر،
+                # وعندها مفيش مساحة بيضاء تتشال بالـ autocrop.
+                try:
+                    from PIL import Image as _PILImage
+                    _im = _PILImage.open(io.BytesIO(img_bytes))
+                    if _im.width > max_output_width:
+                        _ratio = max_output_width / _im.width
+                        _im = _im.resize(
+                            (max_output_width, int(_im.height * _ratio)),
+                            _PILImage.LANCZOS,
+                        )
+                        _buf = io.BytesIO()
+                        _im.save(_buf, format="JPEG", quality=85)
+                        img_bytes = _buf.getvalue()
+                        logger.info(f"[Kashier] final resize → {_im.width}x{_im.height} — {len(img_bytes)} bytes")
+                except Exception as _e:
+                    logger.warning(f"[Kashier] final resize skipped: {_e}")
+
+                logger.info(f"[Kashier] final screenshot {len(img_bytes)} bytes")
                 return img_bytes
+
             finally:
                 ctx.close()
                 browser.close()
@@ -552,7 +694,10 @@ def check_kashier_gate(card_str: str, proxy=None,
     if op_stat in ("AUTHENTICATION_INITIATED", "AUTHENTICATION_IN_PROGRESS",
                    "AUTHENTICATION_AVAILABLE"):
         redirect_url = auth.get("redirectUrl", "")
-        reason = f"3DS/OTP | {resp.get('transactionResponseCode','')} | {redirect_url[:80]}"
+        # ملحوظة: الرابط والكود التقني (3DS/OTP | AUTHENTICATION_IN_PROGRESS | ...)
+        # اتشال من النص الراجع للمستخدم بناءً على طلبه — redirect_url لسه
+        # بيتمرر داخلياً لـ _capture_real_screenshot تحت، بس مش هيظهر فى الرد.
+        reason = "مطلوب تحقق OTP / 3D Secure من البنك"
 
         # ── سكرين شوت حقيقي لصفحة الـ 3DS الفعلية ─────────────────────────────
         screenshot = None

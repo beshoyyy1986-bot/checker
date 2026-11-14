@@ -1120,7 +1120,7 @@ def format_cw_result(status, reason, card_str, bin_inf):
         f"𝐂𝐨𝐮𝐧𝐭𝐫𝐲 ➜ {cntry} - {flag}\n"
         f"𝐁𝐚𝐧𝐤 ➜ {md_escape(bank)}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
+        f"◈━━━━━━━━━◈ ᒍᗩᗰᗩIKᗩ ᑕᕼEᑕKEᖇ ◈━━━━━━━━━◈"
     )
 
 
@@ -1329,9 +1329,7 @@ def main_menu_kb(user_id=None):
         btn("👤 My Account",   STYLE_PRIMARY, callback_data="menu_account"),
         btn("🎫 Redeem Code",  STYLE_SUCCESS, callback_data="menu_redeem"),
     )
-    kb.add(
-        btn("⚙️ Settings",     STYLE_PRIMARY, callback_data="menu_settings"),
-    )
+    # ⚙️ Settings اتنقل للوحة الأدمن فقط (مش حاجة للمستخدم العادي يشوفها)
     if user_id and user_id == ADMIN_ID:
         kb.add(btn("🛠️ Admin Panel", STYLE_DANGER, callback_data="menu_admin"))
     kb.add(
@@ -2090,7 +2088,7 @@ def check_single_ui(card_str, chat_id, user_id, gate_id, msg_id):
         )
         if safe_reason:
             result_msg += f"📄 {safe_reason}\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        result_msg += "Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
+        result_msg += "◈━━━━━━━━━◈ ᒍᗩᗰᗩIKᗩ ᑕᕼEᑕKEᖇ ◈━━━━━━━━━◈"
 
     try:
         if screenshot:
@@ -2192,7 +2190,7 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
             )
             if safe_reason:
                 msg_text += f"📄 {safe_reason}\n━━━━━━━━━━━━━━━━━━━━━━\n"
-            msg_text += "Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
+            msg_text += "◈━━━━━━━━━◈ ᒍᗩᗰᗩIKᗩ ᑕᕼEᑕKEᖇ ◈━━━━━━━━━◈"
 
         try:
             if screenshot:
@@ -2209,7 +2207,14 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
         status, reason, extra = _check_one_card(card, gate_id)
         return _dispatch_card_result(card, status, reason, extra)
 
-    max_workers = 3 if is_kashier else 5
+    # ── إصلاح باج: كان العدد ثابت (3 لـ Kashier / 5 لغيرها) ومبيقرأش
+    # إعداد bulk_threads من الأدمن خالص. دلوقتي بيقرأ القيمة الفعلية،
+    # مع حد أقصى 3 لبوابة Kashier تحديداً لإنها بتفتح متصفح Chromium
+    # حقيقي لكل كارت (تكلفة موارد أعلى بكتير من البوابات التانية اللي
+    # بتعتمد على requests بس) — فوق الرقم ده ممكن يبوّظ السيرفر.
+    configured_threads = int(get_setting('bulk_threads', '5'))
+    max_workers = min(configured_threads, 3) if is_kashier else configured_threads
+    logger.info(f"[Bulk] gate={gate_id} configured_threads={configured_threads} → using max_workers={max_workers}")
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(process_one, card): card for card in cards}
             for future in as_completed(futures):
@@ -2246,7 +2251,7 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
         f"❌ Declined: *{res['declined']}*\n"
         f"⚠️ Error:    *{res['error']}*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Check by ➜ 𝓑𝓜〆𝓥𝓞𝓡𝓣𝓔𝓧"
+        f"◈━━━━━━━━━◈ ᒍᗩᗰᗩIKᗩ ᑕᕼEᑕKEᖇ ◈━━━━━━━━━◈"
     )
     try:
         export_kb = types.InlineKeyboardMarkup()
@@ -2263,6 +2268,10 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
 @bot.callback_query_handler(func=lambda c: c.data == "menu_settings")
 def cb_menu_settings(call):
     user_id = call.from_user.id
+    # ⚙️ الإعدادات بقت خاصة بالأدمن بس — حماية فعلية هنا، مش بس إخفاء الزرار
+    if user_id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "⛔ غير مصرح لك.")
+        return
     chat_id = call.message.chat.id
     mid     = call.message.message_id
     user_main_message[user_id] = mid
@@ -2411,7 +2420,7 @@ def cb_export_results(call):
         "━━━ ERRORS ━━━",
         *errors,
         "",
-        "Check by: BM〆VORTEX",
+        "◈━━━━━━━━━◈ ᒍᗩᗰᗩIKᗩ ᑕᕼEᑕKEᖇ ◈━━━━━━━━━◈",
     ]
     content = "\n".join(lines)
     buf = io.BytesIO(content.encode('utf-8'))
@@ -2442,6 +2451,7 @@ def show_admin_menu(user_id):
     )
     kb.add(
         btn("📊 حالة البروكسيات", STYLE_PRIMARY, callback_data="admin_proxy_stats"),
+        btn("⚙️ الإعدادات",       STYLE_PRIMARY, callback_data="menu_settings"),
     )
     kb.add(
         btn("➕ إضافة بروكسي يدوي", STYLE_SUCCESS, callback_data="admin_add_proxy"),
