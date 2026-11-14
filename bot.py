@@ -27,6 +27,7 @@ import random
 import threading
 import os
 import sys
+import signal
 import sqlite3
 import uuid
 import secrets
@@ -2624,6 +2625,41 @@ def _run_polling():
                 time.sleep(3)
 
 
+def _install_shutdown_handlers():
+    """
+    إيقاف الـ polling فوراً لما Railway يبعت SIGTERM أثناء الـ redeploy.
+
+    ⚠️ المشكلة اللي كانت بتسبب خطأ 409 متكرر:
+    الـ instance القديم كان لسه شغال (بيعمل getUpdates) لحد ما Railway
+    يوقّفه، والـ instance الجديد بدأ يعمل polling في نفس الوقت — فالتنين
+    كانوا بيتزاحموا على نفس الـ bot token، وده بيطلع
+    "409 Conflict: terminated by other getUpdates request".
+
+    الحل: نلتقط SIGTERM و SIGINT ونوقف الـ polling فوراً، فـ instance
+    القديم يسيب الـ token قبل ما الجديد يبدأ.
+
+    ملاحظة: tenacity/pyTelegramBotAPI بيعمل retry داخلي على 409، فبالتالي
+    الـ error ده كان بيظهر كـ log حتى لو الـ polling رجع شغال — الـ logs
+    كانت مضلّلة.
+    """
+    def _handler(signum, _frame):
+        name = signal.Signals(signum).name
+        logger.warning(f"[Shutdown] received {name} — stopping polling immediately...")
+        try:
+            bot.stop_polling()
+        except Exception as e:
+            logger.warning(f"[Shutdown] stop_polling failed: {e}")
+        # مهلة قصيرة تسيب الـ connection تُقفل نضيفة، وبعدها نخرج فوراً
+        threading.Timer(3.0, lambda: os._exit(0)).start()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError) as e:
+            # بيحصل لو مش على الـ main thread
+            logger.warning(f"[Shutdown] could not install handler for {sig}: {e}")
+
+
 def main():
     """Entry point for the bot (used by bot.py and main.py)."""
     print("Starting bot in Polling mode...")
@@ -2648,6 +2684,11 @@ def main():
         except Exception:
             pass
     time.sleep(2)   # فرصة للـ instance القديم إنه يتوقف
+
+    # ── إيقاف الـ polling فوراً عند SIGTERM (RAILWAY REDEPLOY) ────────────────
+    # ده اللي بيمنع الـ 409 Conflict: الـ instance القديم يسيب الـ token
+    # لحظة ما Railway يبعتله SIGTERM، فمفيش تزاحم مع الـ instance الجديد.
+    _install_shutdown_handlers()
 
     print("Bot polling started. Press Ctrl+C to stop.")
     sys.stdout.flush()
