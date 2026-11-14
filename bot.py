@@ -53,6 +53,32 @@ logging.getLogger("telebot").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+
+class _ConflictExceptionHandler(telebot.ExceptionHandler):
+    """
+    يعترض خطأ 409 Conflict بدل ما تطلعه المكتبة كـ ERROR متكرر.
+
+    ليه ده مهم؟
+    لو الـ 409 مابيتعالجش، pyTelegramBotAPI بيسجّل سطر
+    "Threaded polling exception: ... 409 ..." كل مرة، حتى لو الـ polling
+    رجع شغال على طول. ده كان بيخلي الـ logs مليانة ERROR مضلّلة.
+
+    إحنا هنا بنرجع True يعني "اتعاملت معاه" - فالمكتبة مش بتسجّل error
+    وبتكمّل الـ retry بتاعها لوحدها (backoff داخلي).
+
+    الـ 409 ده بيحصل وقت الـ redeploy بس (الـ instance القديم والـ الجديد
+    بيتزاحموا على نفس الـ token) - وهو متوقع ومؤقت.
+    """
+
+    def handle(self, exception):
+        if "409" in str(exception):
+            logger.warning(
+                "409 Conflict - another bot instance is polling this token, retrying..."
+            )
+            time.sleep(3)   # backoff بسيط عشان ما ن pounding على الـ API
+            return True     # handled -> المكتبة ما هتسجّلش ERROR
+        return False        # أي خطأ تاني: خلّي المكتبة تتعامل معاه normally
+
 # ═══════════════════════════════════════
 # قراءة التوكن ومعرف الأدمن
 # ═══════════════════════════════════════
@@ -72,6 +98,9 @@ except Exception as e:
     print(f"Error in bot token: {e}")
     sys.stdout.flush()
     sys.exit(1)
+
+# نركّب الـ exception handler اللي يعترض 409 Conflict (شوف _ConflictExceptionHandler)
+bot.exception_handler = _ConflictExceptionHandler()
 
 # ═══════════════════════════════════════
 # إعدادات البانر
@@ -2602,27 +2631,36 @@ print("=" * 45)
 sys.stdout.flush()
 
 def _run_polling():
-    """تشغيل الـ polling مع retry تلقائى عند 409."""
+    """
+    تشغيل الـ polling.
+
+    ⚠️ ليه مش بنستخدم infinity_polling؟
+    لأنه بيبتلع الـ 409 جوه ومبيطلعش带到 الـ loop الخارجي، فكان الخطأ
+    بيظهر في الـ logs كـ ERROR متكرر من المكتبة (حتى لو الـ polling شغال
+    كويس على طول). مع bot.polling(non_stop=True) + _ConflictExceptionHandler:
+      - الـ 409 بيتعامل معاه الـ handler بتاعنا (سطر warning واحد، مش spam)
+      - المكتبة بتكمّل الـ retry لوحدها (backoff داخلي)
+      - الـ polling ما بيقفش نهائيًا - وده المطلوب
+    """
     while True:
         try:
-            bot.infinity_polling(
+            bot.polling(
+                non_stop=True,
                 timeout=30,
                 long_polling_timeout=20,
                 allowed_updates=None,
+                logger_level=logging.CRITICAL,   # نشيل الـ ERROR spam بتاع المكتبة
             )
-            break   # خرج بشكل طبيعى
+            # polling() رجع = stop_polling اتنادى (SIGTERM) → نخرج
+            print("Bot polling stopped.")
+            break
         except KeyboardInterrupt:
             print("Bot stopped by user")
             break
         except Exception as e:
-            err = str(e)
-            if "409" in err:
-                # instance آخر لا يزال يعمل — انتظر ثم أعد المحاولة
-                logger.warning("409 Conflict — old instance still alive, retrying in 5s...")
-                time.sleep(5)
-            else:
-                logger.error(f"Polling error: {e}")
-                time.sleep(3)
+            # أي خطأ تاني (مش 409) — نسجّل ونكمّل زي ما infinity_polling كان بيعمل
+            logger.error(f"Polling error: {e}")
+            time.sleep(3)
 
 
 def _install_shutdown_handlers():
@@ -2683,12 +2721,18 @@ def main():
             bot.remove_webhook()
         except Exception:
             pass
-    time.sleep(2)   # فرصة للـ instance القديم إنه يتوقف
-
     # ── إيقاف الـ polling فوراً عند SIGTERM (RAILWAY REDEPLOY) ────────────────
     # ده اللي بيمنع الـ 409 Conflict: الـ instance القديم يسيب الـ token
     # لحظة ما Railway يبعتله SIGTERM، فمفيش تزاحم مع الـ instance الجديد.
     _install_shutdown_handlers()
+
+    # ── مهلة سماح عشان الـ instance القديم يسيب الـ token ─────────────────────
+    # Railway بيبعت SIGTERM للـ container القديم قبل ما الـ container الجديد
+    # يكمّل تشغيله. إحنا بنستنى شوية (مش بنعمل getUpdates probe — الـ probe
+    # نفسه كان بيعمل tug-of-war ويبطّل polling الـ instance القديم).
+    grace = 15
+    logger.info(f"[Startup] waiting {grace}s for the previous instance to release the token...")
+    time.sleep(grace)
 
     print("Bot polling started. Press Ctrl+C to stop.")
     sys.stdout.flush()
