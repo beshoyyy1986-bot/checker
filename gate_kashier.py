@@ -197,14 +197,11 @@ def _compute_kashier_hash(merchant_id: str, order_ref: str, amount: str,
 
 
 # Chromium لا يدعم SOCKS5 مع username/password إطلاقاً (قيد فى Chromium نفسه)،
-# فبنمرّر البروكسي ليه كـ HTTP. لكن Bright Data عندها بورتين منفصلين:
+# فبنمرّر البروكسي ليه كـ HTTPS. Bright Data عندها بورتين منفصلين:
 #   22228 → SOCKS5 بس
-#   44445 → HTTP/HTTPS بس
-# والبورت ده *مش* بيكشف البروتوكول تلقائياً. فلو بعتنا HTTP CONNECT على
-# 22228، البورت هيتعامل معاه كأنه SOCKS5، يقفل الـ connection من غير رد،
-# وPlaywright يطلعه: net::ERR_EMPTY_RESPONSE
-# فبنرسم البورت الصح لكل مزوّد قبل ما نمرّره للمتصفح.
-_SOCKS5_TO_HTTP_PORT = {
+#   44445 → HTTPS (TLS) — لازم https:// وإلا الاتصال بيترست
+# فبنحوّل بورت SOCKS5 لبورت HTTPS الصح قبل ما نمرّره للمتصفح.
+_SOCKS5_TO_HTTPS_PORT = {
     "22228": "44445",   # Bright Data (ISP / Datacenter)
 }
 
@@ -216,7 +213,7 @@ def _parse_proxy_for_playwright(proxy_str: str) -> Optional[dict]:
     ⚠️ Chromium لا يدعم SOCKS5 مع username/password إطلاقاً (قيد فى
     Chromium نفسه). فلو البروكسي socks5h://user:pass@host:port، بنحوّله
     لصيغة http:// مع username/password — مع تحويل البورت لـ HTTP port
-    الصحيح بتاع المزوّد (شوف _SOCKS5_TO_HTTP_PORT فوق)، لأن Chromium
+    الصحيح بتاع المزوّد (شوف _SOCKS5_TO_HTTPS_PORT فوق)، لأن Chromium
     بيستخدم HTTP CONNECT والبورت لازم يبقى ده فعلاً.
     """
     if not proxy_str:
@@ -224,12 +221,15 @@ def _parse_proxy_for_playwright(proxy_str: str) -> Optional[dict]:
     m = re.match(r'socks5h?://([^:@]+):([^@]+)@([^:]+):(\d+)', proxy_str)
     if m:
         user, passwd, host, port = m.groups()
-        port = _SOCKS5_TO_HTTP_PORT.get(port, port)
+        mapped_port = _SOCKS5_TO_HTTPS_PORT.get(port)
+        if mapped_port:
+            # Bright Data's 44445 needs TLS (https://), plain HTTP CONNECT gets reset.
+            return {"server": f"https://{host}:{mapped_port}", "username": user, "password": passwd}
         return {"server": f"http://{host}:{port}", "username": user, "password": passwd}
-    m = re.match(r'https?://([^:@]+):([^@]+)@([^:]+):(\d+)', proxy_str)
+    m = re.match(r'(https?)://([^:@]+):([^@]+)@([^:]+):(\d+)', proxy_str)
     if m:
-        user, passwd, host, port = m.groups()
-        return {"server": f"http://{host}:{port}", "username": user, "password": passwd}
+        scheme, user, passwd, host, port = m.groups()
+        return {"server": f"{scheme}://{host}:{port}", "username": user, "password": passwd}
     m = re.match(r'(https?)://([^:@/]+):(\d+)/?$', proxy_str)
     if m:
         scheme, host, port = m.groups()

@@ -436,7 +436,7 @@ BRIGHTDATA_CUSTOMER = "brd-customer-hl_8c2126f6"
 BRIGHTDATA_ZONE     = "isp_proxy2"
 BRIGHTDATA_PASSWORD = "c7x63jpi95pp"
 BRIGHTDATA_HOST     = "brd.superproxy.io"
-BRIGHTDATA_PORT     = "22228"   # SOCKS5 — 44445 بيتعب مع HTTPS CONNECT
+BRIGHTDATA_PORT     = "44445"   # HTTPS proxy port (TLS to Bright Data gateway)
 BRIGHTDATA_ENABLED  = True   # اضبطها False لاستخدام Pool العادى فقط
 
 WEB_UNBLOCKER_HOST = "unblock.oxylabs.io"
@@ -460,7 +460,7 @@ def get_brightdata_rotating_proxy() -> str:
         f"-session-{session_id}"
     )
     return (
-        f"socks5h://{username}:{BRIGHTDATA_PASSWORD}"
+        f"https://{username}:{BRIGHTDATA_PASSWORD}"
         f"@{BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}"
     )
 
