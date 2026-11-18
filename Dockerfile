@@ -17,7 +17,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # تثبيت متصفح Chromium + مكتبات النظام المطلوبة لـ Playwright
-# (ده اللي بياخد سكرين شوت حقيقي لصفحة الـ OTP فى بوابة Kashier)
+# (ده اللي بياخد سكرين شوت حقيقي لصفحة الـ OTP فى بوابتى Kashier و Paymob)
 RUN python -m playwright install --with-deps chromium
 
 COPY . .

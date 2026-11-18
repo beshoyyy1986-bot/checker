@@ -744,6 +744,11 @@ GATES = {
         'name':  '🏦 Kashier Gate 3DS',
         'type':  'kashier',     # Kashier FEP API — returns OTP screenshot
     },
+    'paymob': {
+        'name':  '💳 Paymob Gate 3DS',
+        'type':  'paymob',      # WooCommerce → Paymob API — returns OTP screenshot
+        'site':  'https://educateme-foundation.org',
+    },
 }
 
 # ════════════════════════════════════════
@@ -1115,7 +1120,7 @@ def _check_one_card(card_str, gate_id):
     """
     Route card to correct checker.
     Returns (status, reason, extra_dict).
-    extra_dict may contain 'screenshot': bytes for kashier gate.
+    extra_dict may contain 'screenshot': bytes for kashier / paymob gates.
     """
     gate = GATES[gate_id]
     if gate.get('type') == 'kashier':
@@ -1126,6 +1131,11 @@ def _check_one_card(card_str, gate_id):
         status, reason, screenshot = check_kashier_gate(
             card_str, proxy=proxy_str, proxy_country=proxy_country
         )
+        return status, reason, {'screenshot': screenshot}
+    if gate.get('type') == 'paymob':
+        from gate_paymob import check_paymob_with_retry
+        # من غير proxy → كل محاولة بتاخد بروكسي جديد من الـ pool
+        status, reason, screenshot = check_paymob_with_retry(card_str)
         return status, reason, {'screenshot': screenshot}
     if gate.get('type') == 'cw':
         status, reason = check_cw_with_retry(card_str)
@@ -1159,6 +1169,8 @@ def _is_hit(status, gate_id):
         return status in ('CHARGED', 'APPROVED')
     if GATES[gate_id].get('type') == 'kashier':
         return status in ('OTP', 'APPROVED')
+    if GATES[gate_id].get('type') == 'paymob':
+        return status in ('CHARGED', 'OTP', 'INSUFFICIENT_FUNDS')
     return status in ('PASSED', 'OTP', 'LIVE', 'CCN')
 
 
@@ -1475,6 +1487,8 @@ STATUS_LABEL = {
     # CharityWater gate statuses
     "CHARGED":        ("✅", "CHARGED"),
     "APPROVED":       ("✅", "Approved: (insufficient)"),
+    # Paymob gate statuses
+    "INSUFFICIENT_FUNDS": ("💚", "LIVE — Insufficient Funds"),
     # CHECK + SCREEN gate statuses
     "UNKNOWN":        ("📸", "Screenshot Captured"),
 }
@@ -1613,6 +1627,8 @@ def _run_gate_test(chat_id, msg_id):
             lines.append(f"{info['name']}: ✅ CharityWater API ready")
         elif gtype == 'kashier':
             lines.append(f"{info['name']}: ✅ Kashier FEP API ready")
+        elif gtype == 'paymob':
+            lines.append(f"{info['name']}: ✅ Paymob API ready")
         else:
             lines.append(f"{info['name']}: ⚠️ Unknown type")
 
@@ -2243,7 +2259,9 @@ def check_bulk_ui(cards, chat_id, user_id, gate_id, msg_id):
     # حقيقي لكل كارت (تكلفة موارد أعلى بكتير من البوابات التانية اللي
     # بتعتمد على requests بس) — فوق الرقم ده ممكن يبوّظ السيرفر.
     configured_threads = int(get_setting('bulk_threads', '5'))
-    max_workers = min(configured_threads, 3) if is_kashier else configured_threads
+    # Kashier + Paymob بيفتحوا متصفح Chromium حقيقي لكل كارت عند الـ OTP
+    needs_browser = is_kashier or GATES[gate_id].get('type') == 'paymob'
+    max_workers = min(configured_threads, 3) if needs_browser else configured_threads
     logger.info(f"[Bulk] gate={gate_id} configured_threads={configured_threads} → using max_workers={max_workers}")
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(process_one, card): card for card in cards}
