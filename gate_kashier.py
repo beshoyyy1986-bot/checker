@@ -237,87 +237,26 @@ def _parse_proxy_for_playwright(proxy_str: str) -> Optional[dict]:
     return None
 
 
-def _autocrop_whitespace(img_bytes: bytes, max_output_width: int = 640,
-                         bg_threshold: int = 245) -> bytes:
-    """
-    Auto-crop المساحة البيضاء الفاضية من كل الاتجاهات باستخدام PIL.
-
-    بيستخدم getbbox() على نسخة grayscale للصورة بعد invert — أي pixel
-    أفتح من bg_threshold (أبيض أو قريب منه) بيتحسب خلفية وبيتشال.
-    الـ padding=10px بيضمن إن المحتوى ميبقاش ملصوق بحواف الصورة.
-
-    ده الـ fallback لما _capture_real_screenshot ماتقدرش تصوّر العنصر
-    مباشرة (iframe مش قابل للاستهداف، أو selector مش موجود).
-    """
-    from PIL import Image, ImageOps
-    im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-
-    # حوّل لـ grayscale وعمل invert — الأبيض يبقى أسود فـ getbbox يقدر يشوفه
-    gray = ImageOps.grayscale(im)
-    # أي pixel > threshold = خلفية بيضاء → نعمله 0 (أسود) بعد الـ invert
-    # PIL getbbox بيرجع حدود أول وآخر pixel مش أبيض
-    inverted = gray.point(lambda p: 255 if p < bg_threshold else 0)
-    bbox = inverted.getbbox()   # (left, top, right, bottom) أو None لو كلها بيضاء
-
-    if bbox:
-        pad = 10
-        left  = max(0,        bbox[0] - pad)
-        top   = max(0,        bbox[1] - pad)
-        right = min(im.width, bbox[2] + pad)
-        bot   = min(im.height,bbox[3] + pad)
-        im = im.crop((left, top, right, bot))
-        logger.info(f"[Kashier] autocrop: {im.width}x{im.height} (bbox={bbox})")
-    else:
-        logger.info("[Kashier] autocrop: no content found, returning original")
-
-    # تصغير العرض لو لزم
-    if im.width > max_output_width:
-        ratio = max_output_width / im.width
-        im = im.resize((max_output_width, int(im.height * ratio)), Image.LANCZOS)
-
-    buf = io.BytesIO()
-    im.save(buf, format="JPEG", quality=85)
-    return buf.getvalue()
-
-
-# CSS selector للعنصر الرئيسي لصفحة الـ OTP/3DS
-# الأولوية: container صفحة OTP ← form ← body
-_OTP_CONTAINER_SELECTORS = [
-    # containers شائعة فى صفحات 3DS
-    ".challenge-container",
-    ".otp-container",
-    "#challengeForm",
-    "#otpForm",
-    "form",           # أي form فى الصفحة
-    "body",           # fallback أخير
-]
-
-_OTP_INPUT_SELECTORS = (
-    "input[type='number'], input[type='tel'], input[type='text'], "
-    "input[type='password'], input[name*='otp' i], input[name*='code' i], "
-    "input[placeholder*='OTP' i], input[placeholder*='code' i], form"
-)
-
-
 def _capture_real_screenshot(url: str, proxy_str: Optional[str],
-                              width: int = 480, height: int = 700,
+                              width: int = 1280, height: int = 900,
                               max_output_width: int = 640) -> Optional[bytes]:
     """
     سكرين شوت *حقيقي* لصفحة الـ 3DS/OTP الفعلية باستخدام Playwright.
 
-    الاستراتيجية (من الأفضل للأسوأ):
-    1. element.screenshot() — يصوّر العنصر نفسه بالظبط بدون أي مساحة فاضية.
-       بنجرّب _OTP_CONTAINER_SELECTORS بالترتيب حتى نلاقي عنصر مرئي.
-    2. full_page screenshot + auto-crop بـ PIL — لو مافيش عنصر يستهدف
-       (iframe مثلاً)، بناخد الصفحة كلها ونشيل المساحة البيضاء تلقائياً.
+    ده استبدال للدالة القديمة اللي كانت بترسم صورة ثابتة بـ PIL من غير ما
+    تفتح الصفحة أصلاً — هنا بنفتح الرابط فعلياً فى متصفح Chromium headless
+    ونصوّر اللى ظاهر بالفعل (نموذج OTP حقيقي، لوجو البنك، إلخ).
 
-    التحسينات على النسخة القديمة:
-    - viewport أصغر (480px عرض بدل 1280px) — أقرب لشاشة موبايل، محتوى OTP
-      مركّز ومش غارق فى مساحة ديسكتوب فاضية
-    - element.screenshot() كأولوية — الصورة بحجم العنصر نفسه بالظبط
-    - auto-crop PIL كـ fallback — بدل crop يدوي بـ 900px ثابت
+    التحسينات:
+    - wait_until="load" بدل "domcontentloaded" — ينتظر JS + network requests
+    - height=700 بدل 420 — عشان نموذج OTP ميكونش مقطوع
+    - wait_for_selector قبل التصوير — بيتأكد إن الـ form/input ظاهر فعلاً
+    - انتظار 3000ms بعد الـ selector — لأي JS late rendering / iframe داخلي
+    - bypass_csp=True — عشان بعض صفحات 3DS بتحتاجه
+    - --disable-gpu إضافي لاستقرار أحسن على Linux headless
 
-    Returns JPEG bytes أو None لو فشل.
+    Returns JPEG bytes أو None لو فشل (عندها check_kashier_gate بيرجع
+    لصورة توضيحية احتياطية مكتوب عليها صراحة إنها مش سكرين شوت حقيقي).
     """
     if not url:
         return None
@@ -346,81 +285,88 @@ def _capture_real_screenshot(url: str, proxy_str: Optional[str],
                 viewport={"width": width, "height": height},
                 user_agent=ua,
                 locale="en-US",
+                # تعطيل Content-Security-Policy — بعض صفحات 3DS بتحتاجه لتحميل iframes
                 bypass_csp=True,
             )
             page = ctx.new_page()
             try:
+                # "load" بدل "domcontentloaded" — ينتظر JS + network requests كمان
                 page.goto(url, wait_until="load", timeout=30000)
                 logger.info(f"[Kashier] page loaded: {url[:80]}")
 
-                # انتظر ظهور input/form
+                # انتظر ظهور أي input (خانة OTP/رقم) أو form فى الصفحة أو iframe
                 try:
-                    page.wait_for_selector(_OTP_INPUT_SELECTORS, timeout=8000, state="visible")
-                    logger.info("[Kashier] OTP/form element found")
+                    page.wait_for_selector(
+                        "input[type='number'], input[type='tel'], input[type='text'], "
+                        "input[type='password'], input[name*='otp' i], input[name*='code' i], "
+                        "input[placeholder*='OTP' i], input[placeholder*='code' i], form",
+                        timeout=8000,
+                        state="visible",
+                    )
+                    logger.info("[Kashier] OTP/form element found in page")
                 except Exception:
-                    logger.info("[Kashier] no OTP selector — taking screenshot anyway")
+                    # مش error — ممكن الـ OTP form جوه iframe أو ظهر بشكل تاني
+                    logger.info("[Kashier] no OTP selector found — taking screenshot anyway")
 
-                # انتظار late JS rendering
-                page.wait_for_timeout(2000)
+                # انتظار إضافي لأي JS late rendering أو iframe داخلي
+                page.wait_for_timeout(3000)
 
-                # ── Strategy 1: element.screenshot() ─────────────────────────
+                # ── المشكلة الحقيقية: مش حجم الالتقاط، المساحة البيضاء حوله ────
+                # الصفحة بترندر على عرض 1280 لكن المحتوى الفعلي (الفورم)
+                # غالباً أصغر بكتير وموجود فى النص، محاط بفراغ أبيض يمين/
+                # شمال/تحت. الحل: نحاول نصوّر العنصر نفسه مباشرة، ولو
+                # فشلنا ناخد الصفحة كاملة ونعمل auto-crop للبياض بعدين.
+
                 img_bytes = None
-                for sel in _OTP_CONTAINER_SELECTORS:
+                for sel in ("form", "main", "[class*='container']",
+                            "[class*='wrapper']", "[class*='card']",
+                            "[class*='verify']", "[class*='auth']"):
                     try:
-                        el = page.query_selector(sel)
-                        if el and el.is_visible():
-                            img_bytes = el.screenshot(type="jpeg", quality=88)
-                            logger.info(f"[Kashier] element screenshot OK (selector={sel!r}) — {len(img_bytes)} bytes")
-                            break
-                    except Exception as ex:
-                        logger.debug(f"[Kashier] element screenshot failed for {sel!r}: {ex}")
+                        el = page.locator(sel).first
+                        if el.count() > 0 and el.is_visible():
+                            box = el.bounding_box()
+                            if box and box["width"] > 200 and box["height"] > 80:
+                                img_bytes = el.screenshot(type="jpeg", quality=88)
+                                logger.info(
+                                    f"[Kashier] element '{sel}' screenshot "
+                                    f"{int(box['width'])}x{int(box['height'])}"
+                                )
+                                break
+                    except Exception:
+                        continue
 
-                # ── Strategy 2: full_page + auto-crop ────────────────────────
                 if not img_bytes:
-                    logger.info("[Kashier] falling back to full_page + autocrop")
-                    raw = page.screenshot(type="png", full_page=True)
-                    try:
-                        img_bytes = _autocrop_whitespace(raw, max_output_width=max_output_width)
-                        logger.info(f"[Kashier] autocrop screenshot — {len(img_bytes)} bytes")
-                    except Exception as e:
-                        logger.warning(f"[Kashier] autocrop failed: {e} — using raw")
-                        # تصغير بسيط بدون crop كحل أخير
-                        try:
-                            from PIL import Image
-                            im = Image.open(io.BytesIO(raw))
-                            if im.width > max_output_width:
-                                ratio = max_output_width / im.width
-                                im = im.resize((max_output_width, int(im.height * ratio)), Image.LANCZOS)
-                            buf = io.BytesIO()
-                            im.save(buf, format="JPEG", quality=85)
-                            img_bytes = buf.getvalue()
-                        except Exception:
-                            img_bytes = raw   # worst case: PNG الأصلي
+                    img_bytes = page.screenshot(type="jpeg", quality=88, full_page=True)
+                    logger.info(f"[Kashier] fallback full-page screenshot — {len(img_bytes)} bytes")
 
-                # ── Mandatory final resize ────────────────────────────────────
-                # بغض النظر عن الـ strategy اللي شتغلت، بنضمن هنا إن العرض
-                # ما يعديش max_output_width — بعض الصفحات (زي USAA SafeKey)
-                # بترندر نفسها بعرض ديسكتوب كامل حتى لو الـ viewport أصغر،
-                # وعندها مفيش مساحة بيضاء تتشال بالـ autocrop.
+                # ── PIL: شيل أي بياض متبقي حوالين المحتوى + صغّر لو لازم ───────
                 try:
-                    from PIL import Image as _PILImage
-                    _im = _PILImage.open(io.BytesIO(img_bytes))
-                    if _im.width > max_output_width:
-                        _ratio = max_output_width / _im.width
-                        _im = _im.resize(
-                            (max_output_width, int(_im.height * _ratio)),
-                            _PILImage.LANCZOS,
-                        )
-                        _buf = io.BytesIO()
-                        _im.save(_buf, format="JPEG", quality=85)
-                        img_bytes = _buf.getvalue()
-                        logger.info(f"[Kashier] final resize → {_im.width}x{_im.height} — {len(img_bytes)} bytes")
-                except Exception as _e:
-                    logger.warning(f"[Kashier] final resize skipped: {_e}")
+                    from PIL import Image, ImageChops
+                    im  = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                    bg  = Image.new("RGB", im.size, (255, 255, 255))
+                    bbox = ImageChops.difference(im, bg).getbbox()
+                    if bbox:
+                        x0 = max(0, bbox[0] - 8)
+                        y0 = max(0, bbox[1] - 8)
+                        x1 = min(im.width,  bbox[2] + 8)
+                        y1 = min(im.height, bbox[3] + 8)
+                        if (x1 - x0) > 100 and (y1 - y0) > 50:   # تأكد إننا مقصناش كل حاجة بالغلط
+                            im = im.crop((x0, y0, x1, y1))
+                            logger.info(f"[Kashier] auto-cropped whitespace → {im.width}x{im.height}")
 
-                logger.info(f"[Kashier] final screenshot {len(img_bytes)} bytes")
+                    if im.width > max_output_width:
+                        ratio    = max_output_width / im.width
+                        new_size = (max_output_width, int(im.height * ratio))
+                        im       = im.resize(new_size, Image.LANCZOS)
+
+                    buf = io.BytesIO()
+                    im.save(buf, format="JPEG", quality=85)
+                    img_bytes = buf.getvalue()
+                    logger.info(f"[Kashier] final {im.width}x{im.height} — {len(img_bytes)} bytes")
+                except Exception as e:
+                    logger.warning(f"[Kashier] crop/resize skipped: {e}")
+
                 return img_bytes
-
             finally:
                 ctx.close()
                 browser.close()
